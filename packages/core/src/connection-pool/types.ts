@@ -13,12 +13,15 @@ export interface PoolConnection {
 	lastUsed: number;
 }
 
-export interface ConnectionPoolOptions {
-	minConnections?: number;
-	maxConnections?: number;
-	idleTimeoutMs?: number;
-	cleanupIntervalMs?: number;
-	acquireTimeoutMs?: number;
+export interface ForwardServiceOptions {
+	host: string;
+	port: number;
+	name: string;
+	minPoolConnections?: number;
+	maxPoolConnections?: number;
+	idleConnectionTimeoutMs?: number;
+	connectionCleanupIntervalMs?: number;
+	acquireConnectionTimeoutMs?: number;
 }
 
 export interface PoolStats {

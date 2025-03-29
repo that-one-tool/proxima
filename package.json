@@ -2,8 +2,8 @@
 	"name": "@that-one-tool/proxima",
 	"private": true,
 	"scripts": {
-		"build": "turbo build --filter=@that-one-tool/proxima-core && turbo build",
-		"build:force": "npm run build -- --force",
+		"build": "turbo build",
+		"build:force": "turbo build --force",
 		"check": "turbo build lint test",
 		"check:fix": "turbo build format lint:fix test",
 		"check:force": "turbo build lint test --force",

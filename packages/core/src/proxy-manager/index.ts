@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { Config } from '../configuration';
 import { ConnectionPool } from '../connection-pool';
-import { ConnectionPoolOptions } from '../connection-pool/types';
 import { ContextualError } from '../errors';
 import { TransformFunction } from '../types';
 
@@ -11,36 +10,23 @@ export class ProxyManager {
 	private transformFromClient: TransformFunction;
 	private transformToClient: TransformFunction;
 	private serviceConnectionPool: ConnectionPool;
-	private retryCount = 0;
-	private maxRetries = 5;
-	private isShuttingDown = false;
 
 	private readonly proxies: Map<string, net.Server> = new Map();
 
-	constructor(config: Config, poolOptions?: ConnectionPoolOptions) {
+	constructor(config: Config) {
 		this.config = config;
-		this.serviceConnectionPool = this.initializeServiceConnectionPool(poolOptions);
+		this.serviceConnectionPool = this.initializeConnectionPool();
 	}
 
-	initializeServiceConnectionPool(poolOptions?: ConnectionPoolOptions): ConnectionPool {
-		const connectionPool = new ConnectionPool(
-			this.config,
-			poolOptions || {
-				minConnections: 5,
-				maxConnections: 20,
-				idleTimeoutMs: 30000,
-			},
-		);
+	private initializeConnectionPool(): ConnectionPool {
+		const connectionPool = new ConnectionPool(this.config.forwardServiceOptions);
 
 		connectionPool.on('ready', () => {
 			console.log('Connection pool ready');
-			// Reset retry count when pool becomes ready
-			this.retryCount = 0;
 		});
 
 		connectionPool.on('error', (error) => {
 			console.error('Connection pool error', error);
-			this.handleConnectionPoolError();
 		});
 
 		connectionPool.on('connection', (data) => {
@@ -51,39 +37,12 @@ export class ProxyManager {
 			console.log('Connection closed in pool', data);
 		});
 
+		connectionPool.on('connectionPoolFailure', async (data) => {
+			console.error('Connection pool failure. Exiting...', data);
+			await this.stopServers();
+		});
+
 		return connectionPool;
-	}
-
-	private handleConnectionPoolError(): void {
-		const stats = this.serviceConnectionPool.getStats();
-
-		// Implement a retry with exponential backoff before exiting
-		if (stats.total <= stats.minConnections && !this.isShuttingDown) {
-			if (this.retryCount < this.maxRetries) {
-				this.retryCount++;
-				const backoffDelay = Math.min(1000 * Math.pow(2, this.retryCount), 30000); // Cap at 30 seconds
-
-				console.log(`Attempting to recover connection pool (retry ${this.retryCount}/${this.maxRetries}) after ${backoffDelay}ms`);
-
-				setTimeout(() => {
-					console.log(`Retry ${this.retryCount}: Attempting to reinitialize connections`);
-					void this.attemptReinitialization();
-				}, backoffDelay);
-			} else {
-				console.error(`Maximum retries (${this.maxRetries}) reached. Shutting down...`);
-				this.stopServers();
-				process.exit(1);
-			}
-		}
-	}
-
-	private async attemptReinitialization(): Promise<void> {
-		try {
-			await this.serviceConnectionPool.reinitializeMinConnections();
-		} catch (error) {
-			console.error(`Failed to reinitialize connections on retry ${this.retryCount}`, error);
-			this.handleConnectionPoolError();
-		}
 	}
 
 	setTransformFromClient(transformFromClient: TransformFunction): void {
@@ -102,20 +61,29 @@ export class ProxyManager {
 				console.log('=> Linked reverse proxy listening', { port, mapping });
 			});
 
+			proxy.on('close', () => {
+				console.log('=> Reverse proxy closed gracefully', { port, mapping });
+				this.proxies.delete(port);
+
+				if (this.proxies.size === 0) {
+					console.log('=> No reverse proxies left. Exiting...');
+					process.exit(0);
+				}
+			});
+
 			this.proxies.set(port, proxy);
 		}
 	}
 
-	stopServers(): void {
-		this.isShuttingDown = true;
+	async stopServers(): Promise<void> {
 		const ports = new Set<string>(this.proxies.keys());
 
 		for (const port of ports) {
 			this.stopServer(port);
 		}
 
-		void this.serviceConnectionPool.shutdown().catch((error) => {
-			console.error('Error shutting down connection pool', error);
+		await this.serviceConnectionPool.shutdown().catch((error) => {
+			console.error('Error shutting down service connection pool', error);
 		});
 	}
 
@@ -224,8 +192,6 @@ export class ProxyManager {
 		proxy?.close((error) => {
 			if (error) {
 				console.error('An error occured while stopping the server', { port, error });
-			} else {
-				console.log('Server stopped gracefully', { port });
 			}
 		});
 

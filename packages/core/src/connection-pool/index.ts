@@ -1,99 +1,49 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
-import { Config } from '../configuration';
 import { ConnectionPoolError } from '../errors';
-import { ConnectionPoolOptions, ConnectionStatus, PoolConnection, PoolStats } from './types';
+import { ForwardServiceOptions, ConnectionStatus, PoolConnection, PoolStats } from './types';
 
 export class ConnectionPool extends EventEmitter {
-	private config: Config;
-	private options: Required<ConnectionPoolOptions>;
+	private options: Required<ForwardServiceOptions>;
 	private connections: Map<string, PoolConnection> = new Map();
 	private waitingQueue: Array<(connection: PoolConnection | null) => void> = [];
 	private cleanupTimer: NodeJS.Timeout | null = null;
 	private connectionCounter = 0;
+	private isWaitingToRetry = false;
+	private retryCount = 0;
+	private maxRetries = 5;
+	private isShuttingDown = false;
 
-	constructor(config: Config, options: ConnectionPoolOptions = {}) {
+	constructor(options: ForwardServiceOptions) {
 		super();
-		this.config = config;
+
+		if (!options.host) {
+			throw new ConnectionPoolError('Host is required');
+		}
+
+		if (!options.port) {
+			throw new ConnectionPoolError('Port is required');
+		}
 
 		this.options = {
-			minConnections: options.minConnections ?? 5,
-			maxConnections: options.maxConnections ?? 20,
-			idleTimeoutMs: options.idleTimeoutMs ?? 30000,
-			cleanupIntervalMs: options.cleanupIntervalMs ?? 30000,
-			acquireTimeoutMs: options.acquireTimeoutMs ?? 5000,
+			host: options.host,
+			port: options.port,
+			name: options.name,
+			minPoolConnections: options.minPoolConnections ?? 0,
+			maxPoolConnections: options.maxPoolConnections ?? 10,
+			idleConnectionTimeoutMs: options.idleConnectionTimeoutMs ?? 30000,
+			connectionCleanupIntervalMs: options.connectionCleanupIntervalMs ?? 30000,
+			acquireConnectionTimeoutMs: options.acquireConnectionTimeoutMs ?? 5000,
 		};
 
 		void this.initialize();
-	}
-
-	private async initialize(): Promise<void> {
-		try {
-			// Create minimum connections
-			for (let i = 0; i < this.options.minConnections; i++) {
-				await this.createConnection();
-			}
-
-			this.startCleanup();
-
-			this.emit('ready');
-		} catch (error) {
-			this.emit('error', new ConnectionPoolError('Failed to initialize connection pool', { cause: error }));
-		}
-	}
-
-	/**
-	 * Create a new connection
-	 */
-	private createConnection(): Promise<PoolConnection> {
-		return new Promise((resolve, reject) => {
-			try {
-				const id = `C-${randomUUID().slice(24)}`;
-				const socket = net.createConnection(this.config.forwardPort, this.config.forwardHost);
-				++this.connectionCounter;
-
-				const connection: PoolConnection = {
-					id,
-					socket,
-					status: ConnectionStatus.IDLE,
-					lastUsed: Date.now(),
-				};
-
-				// Set up socket event handlers
-				socket.once('connect', () => {
-					this.connections.set(id, connection);
-					this.emit('connection', { id, poolSize: this.connections.size });
-					resolve(connection);
-				});
-
-				socket.on('error', (err: Error) => {
-					if (!this.connections.has(id)) {
-						// Connection failed during creation
-						reject(new ConnectionPoolError('Connection creation failed', { cause: err }));
-						return;
-					}
-
-					this.emit('connectionError', { id, error: err });
-					this.removeConnection(id);
-				});
-
-				socket.on('close', () => {
-					if (this.connections.has(id)) {
-						this.removeConnection(id);
-					}
-				});
-			} catch (error) {
-				reject(new ConnectionPoolError('Failed to create connection', { cause: error }));
-			}
-		});
 	}
 
 	/**
 	 * Get an available connection or create a new one if needed
 	 */
 	async getConnection(): Promise<PoolConnection | null> {
-		// Find an idle connection
 		for (const connection of this.connections.values()) {
 			if (connection.status === ConnectionStatus.IDLE) {
 				connection.status = ConnectionStatus.BUSY;
@@ -102,8 +52,7 @@ export class ConnectionPool extends EventEmitter {
 			}
 		}
 
-		// Create a new connection if below max limit
-		if (this.connections.size < this.options.maxConnections) {
+		if (this.connections.size < this.options.maxPoolConnections) {
 			try {
 				const connection = await this.createConnection();
 				connection.status = ConnectionStatus.BUSY;
@@ -122,7 +71,7 @@ export class ConnectionPool extends EventEmitter {
 					this.waitingQueue.splice(index, 1);
 				}
 				resolve(null);
-			}, this.options.acquireTimeoutMs);
+			}, this.options.acquireConnectionTimeoutMs);
 
 			const callback = (connection: PoolConnection | null) => {
 				clearTimeout(timeout);
@@ -154,81 +103,10 @@ export class ConnectionPool extends EventEmitter {
 	}
 
 	/**
-	 * Remove a connection from the pool
-	 */
-	private removeConnection(connectionId: string): void {
-		const connection = this.connections.get(connectionId);
-		if (!connection) return;
-
-		try {
-			connection.status = ConnectionStatus.CLOSED;
-			connection.socket.removeAllListeners();
-			connection.socket.destroy();
-			this.connections.delete(connectionId);
-
-			this.emit('connectionClosed', { id: connectionId, poolSize: this.connections.size });
-
-			// Create a new connection if below minimum and not shutting down
-			if (this.connections.size < this.options.minConnections && this.cleanupTimer !== null) {
-				void this.createConnection().catch((error) => {
-					this.emit('error', new ConnectionPoolError('Failed to create replacement connection', { cause: error }));
-				});
-			}
-		} catch (error) {
-			this.emit(
-				'error',
-				new ConnectionPoolError('Error removing connection', {
-					cause: error,
-					context: { connectionId },
-				}),
-			);
-		}
-	}
-
-	/**
 	 * Close a specific connection
 	 */
 	closeConnection(connectionId: string): void {
 		this.removeConnection(connectionId);
-	}
-
-	/**
-	 * Start periodic cleanup of idle connections
-	 */
-	private startCleanup(): void {
-		this.cleanupTimer = setInterval(() => {
-			this.cleanupIdleConnections();
-		}, this.options.cleanupIntervalMs);
-	}
-
-	/**
-	 * Clean up idle connections that exceed the idle timeout
-	 */
-	private cleanupIdleConnections(): void {
-		const now = Date.now();
-		const idleThreshold = now - this.options.idleTimeoutMs;
-		let idleCount = 0;
-
-		// Count idle connections
-		for (const connection of this.connections.values()) {
-			if (connection.status === ConnectionStatus.IDLE) {
-				idleCount++;
-			}
-		}
-
-		// Only remove idle connections if we have more than the minimum
-		if (idleCount > this.options.minConnections) {
-			for (const [id, connection] of this.connections.entries()) {
-				if (
-					connection.status === ConnectionStatus.IDLE &&
-					connection.lastUsed < idleThreshold &&
-					idleCount > this.options.minConnections
-				) {
-					this.removeConnection(id);
-					idleCount--;
-				}
-			}
-		}
 	}
 
 	/**
@@ -251,56 +129,31 @@ export class ConnectionPool extends EventEmitter {
 			idle,
 			busy,
 			waiting: this.waitingQueue.length,
-			maxConnections: this.options.maxConnections,
-			minConnections: this.options.minConnections,
+			maxConnections: this.options.maxPoolConnections,
+			minConnections: this.options.minPoolConnections,
 		};
-	}
-
-	/**
-	 * Reinitialize connections to meet the minimum connection requirement
-	 * This is used to recover from connection failures
-	 */
-	async reinitializeMinConnections(): Promise<void> {
-		try {
-			const currentCount = this.connections.size;
-			const neededConnections = Math.max(0, this.options.minConnections - currentCount);
-
-			console.log(
-				`Reinitializing connections. Current: ${currentCount}, Minimum required: ${this.options.minConnections}, Creating: ${neededConnections}`,
-			);
-
-			// Create new connections to meet the minimum requirement
-			for (let i = 0; i < neededConnections; i++) {
-				await this.createConnection();
-			}
-
-			console.log(`Successfully reinitialized connections. Current pool size: ${this.connections.size}`);
-		} catch (error) {
-			throw new ConnectionPoolError('Failed to reinitialize minimum connections', { cause: error });
-		}
 	}
 
 	/**
 	 * Shut down the connection pool
 	 */
 	async shutdown(): Promise<void> {
-		// Stop cleanup timer
+		this.isShuttingDown = true;
+
 		if (this.cleanupTimer) {
 			clearInterval(this.cleanupTimer);
 			this.cleanupTimer = null;
 		}
 
-		// Resolve any waiting clients with null
 		for (const callback of this.waitingQueue) {
 			callback(null);
 		}
+
 		this.waitingQueue = [];
 
-		// Close all connections
 		const closePromises: Promise<void>[] = [];
 
 		for (const id of this.connections.keys()) {
-			// Create a promise for each connection closure
 			closePromises.push(
 				new Promise<void>((resolve) => {
 					this.removeConnection(id);
@@ -309,9 +162,187 @@ export class ConnectionPool extends EventEmitter {
 			);
 		}
 
-		// Wait for all connections to close
 		await Promise.all(closePromises);
 
 		this.emit('shutdown');
+	}
+
+	private async attemptReinitialization(): Promise<void> {
+		try {
+			await this.reinitializeMinConnections();
+		} catch (error) {
+			console.error(`Failed to reinitialize connections on retry ${this.retryCount}`, error);
+			this.handleConnectionPoolError();
+		}
+	}
+
+	private cleanupIdleConnections(): void {
+		const now = Date.now();
+		const idleThreshold = now - this.options.idleConnectionTimeoutMs;
+		let idleCount = 0;
+
+		// Count idle connections
+		for (const connection of this.connections.values()) {
+			if (connection.status === ConnectionStatus.IDLE) {
+				idleCount++;
+			}
+		}
+
+		// Only remove idle connections if we have more than the minimum
+		if (idleCount > this.options.minPoolConnections) {
+			for (const [id, connection] of this.connections.entries()) {
+				if (
+					connection.status === ConnectionStatus.IDLE &&
+					connection.lastUsed < idleThreshold &&
+					idleCount > this.options.minPoolConnections
+				) {
+					this.removeConnection(id);
+					idleCount--;
+				}
+			}
+		}
+	}
+
+	private createConnection(): Promise<PoolConnection> {
+		return new Promise((resolve, reject) => {
+			try {
+				const id = `C-${randomUUID().slice(24)}`;
+				const socket = net.createConnection(this.options.port, this.options.host);
+				++this.connectionCounter;
+
+				const connection: PoolConnection = {
+					id,
+					socket,
+					status: ConnectionStatus.IDLE,
+					lastUsed: Date.now(),
+				};
+
+				socket.once('connect', () => {
+					this.connections.set(id, connection);
+					this.emit('connection', { id, poolSize: this.connections.size });
+					resolve(connection);
+				});
+
+				socket.on('error', (err: Error) => {
+					if (!this.connections.has(id)) {
+						reject(new ConnectionPoolError('Connection creation failed', { cause: err }));
+						return;
+					}
+
+					this.emit('connectionError', { id, error: err });
+					this.removeConnection(id);
+				});
+
+				socket.on('close', () => {
+					if (this.connections.has(id)) {
+						this.removeConnection(id);
+					}
+				});
+			} catch (error) {
+				reject(new ConnectionPoolError('Failed to create connection', { cause: error }));
+			}
+		});
+	}
+
+	private async createMultipleConnections(count: number): Promise<void> {
+		for (let i = 0; i < count; i++) {
+			await this.createConnection();
+		}
+	}
+
+	private handleConnectionPoolError(): void {
+		const stats = this.getStats();
+		const isConnectionPoolStateHealthy = stats.total >= stats.minConnections && !this.isShuttingDown;
+		const isConnectionPoolStateDegraded = stats.total < stats.minConnections && !this.isShuttingDown;
+		const canRetryRestoringConnectionPool = this.retryCount < this.maxRetries;
+
+		if (!isConnectionPoolStateHealthy && !canRetryRestoringConnectionPool) {
+			this.emit('connectionPoolFailure', new ConnectionPoolError('Failed to recover connection pool'));
+			return;
+		}
+
+		if (isConnectionPoolStateDegraded && canRetryRestoringConnectionPool && !this.isWaitingToRetry) {
+			this.retryCount++;
+			this.isWaitingToRetry = true;
+			const backoffDelay = Math.min(1000 * Math.pow(2, this.retryCount), 30000);
+
+			console.log(`Attempting to recover connection pool (retry ${this.retryCount}/${this.maxRetries}) after ${backoffDelay}ms`);
+
+			setTimeout(() => {
+				console.log(`Retry ${this.retryCount}: Attempting to reinitialize connections`);
+				void this.attemptReinitialization();
+			}, backoffDelay);
+		}
+	}
+
+	private async initialize(): Promise<void> {
+		try {
+			await this.createMultipleConnections(this.options.minPoolConnections);
+
+			this.startCleanup();
+
+			this.emit('ready');
+		} catch (error) {
+			this.emit('error', new ConnectionPoolError('Failed to initialize connection pool', { cause: error }));
+			this.handleConnectionPoolError();
+		}
+	}
+
+	private async reinitializeMinConnections(): Promise<void> {
+		this.isWaitingToRetry = false;
+
+		try {
+			const currentCount = this.connections.size;
+			const neededConnections = Math.max(0, this.options.minPoolConnections - currentCount);
+
+			console.log(
+				`Reinitializing connections. Current: ${currentCount}, Minimum required: ${this.options.minPoolConnections}, Creating: ${neededConnections}`,
+			);
+
+			await this.createMultipleConnections(neededConnections);
+
+			this.retryCount = 0;
+			console.log(`Successfully reinitialized connections. Current pool size: ${this.connections.size}`);
+		} catch (error) {
+			throw new ConnectionPoolError('Failed to reinitialize minimum connections', { cause: error });
+		}
+	}
+
+	private removeConnection(connectionId: string): void {
+		const connection = this.connections.get(connectionId);
+		if (!connection) return;
+
+		try {
+			connection.status = ConnectionStatus.CLOSED;
+			connection.socket.removeAllListeners();
+			connection.socket.destroy();
+			this.connections.delete(connectionId);
+
+			this.emit('connectionClosed', { id: connectionId, poolSize: this.connections.size });
+
+			if (this.connections.size < this.options.minPoolConnections && !this.isShuttingDown) {
+				void this.createConnection().catch((error) => {
+					this.emit('error', new ConnectionPoolError('Failed to create replacement connection', { cause: error }));
+
+					if (this.connections.size === 0) {
+						this.handleConnectionPoolError();
+					}
+				});
+			}
+		} catch (error) {
+			this.emit(
+				'error',
+				new ConnectionPoolError('Error removing connection', {
+					cause: error,
+					context: { connectionId },
+				}),
+			);
+		}
+	}
+
+	private startCleanup(): void {
+		this.cleanupTimer = setInterval(() => {
+			this.cleanupIdleConnections();
+		}, this.options.connectionCleanupIntervalMs);
 	}
 }

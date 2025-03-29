@@ -24,7 +24,9 @@ export class Proxima {
 
 			this.proxyManager.startServers();
 
-			console.log(`Forwarding to ${this.config.forwardServiceName} at ${this.config.forwardHost}:${this.config.forwardPort}`);
+			console.log(
+				`Forwarding to ${this.config.forwardServiceOptions.name} at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
+			);
 
 			return this;
 		} catch (error) {
@@ -34,7 +36,8 @@ export class Proxima {
 		}
 	}
 
-	stop(): void {
-		this.proxyManager.stopServers();
+	async stop(): Promise<void> {
+		await this.proxyManager.stopServers();
+		process.exit(0);
 	}
 }
