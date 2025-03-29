@@ -1,0 +1,11 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": {
+			"@that-one-tool/proxima-core/*": ["../core/*"]
+		}
+	},
+	"include": ["./src/**/*.ts"],
+	"exclude": ["./build", "./dist", "./test", "./node_modules"]
+}

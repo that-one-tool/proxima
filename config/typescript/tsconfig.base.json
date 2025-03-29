@@ -1,0 +1,24 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"compilerOptions": {
+		"module": "CommonJS",
+		"target": "ES2022",
+		"outDir": "./dist/",
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"isolatedModules": true,
+		"moduleResolution": "node",
+		"noFallthroughCasesInSwitch": true,
+		"resolveJsonModule": true,
+		"strict": true,
+		"allowJs": true,
+		"noEmit": false,
+		"baseUrl": ".",
+		"paths": {
+			"@repo/eslint/*": ["config/eslint/*"],
+			"@repo/typescript/*": ["config/typescript/*"],
+			"@that-one-tool/proxima-core/*": ["packages/core/*"]
+		},
+		"types": ["node"]
+	}
+}

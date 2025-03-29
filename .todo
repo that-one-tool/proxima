@@ -1,0 +1,4 @@
+[x] Connection pool
+[x] Connection on forward service
+[ ] Connection pool on client port
+[ ] TLS

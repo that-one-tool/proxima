@@ -1,0 +1,82 @@
+name: 'proxima'
+
+volumes:
+    grafana-data:
+    localstack-data:
+    redis-data:
+    seq-data:
+
+networks:
+    proxima:
+        driver: bridge
+
+services:
+    grafana:
+        image: grafana/grafana-oss
+        container_name: grafana
+        hostname: grafana
+        restart: unless-stopped
+        volumes:
+            - 'grafana-data:/var/lib/grafana'
+        ports:
+            - '3010:3000'
+
+    localstack:
+        image: localstack/localstack:3.3.0
+        container_name: localstack
+        hostname: localstack
+        ports:
+            - '4566:4566'
+            - '4510-4559:4510-4559'
+        environment:
+            - DEBUG=1
+            - LOCALSTACK_AUTH_TOKEN="ls-wOVopUZi-Keka-8680-fuzI-CUwO9546b232"
+            - LOCALSTACK_HOST=localstack:4566
+            - S3_SKIP_SIGNATURE_VALIDATION=1
+            - SERVICES=dynamodb,es,firehose,s3,sts
+        volumes:
+            - 'localstack-data:/var/lib/localstack'
+            - '/var/run/docker.sock:/var/run/docker.sock'
+
+    prometheus:
+        image: prom/prometheus
+        container_name: prometheus
+        hostname: prometheus
+        volumes:
+            - '../prometheus.yml:/etc/prometheus/prometheus.yml'
+        ports:
+            - 9090:9090
+
+    redis:
+        image: redis:7.4.1-alpine3.20
+        container_name: redis
+        hostname: redis
+        ports:
+            - '6379:6379'
+        volumes:
+            - 'redis-data:/data'
+
+    redis-commander:
+        image: rediscommander/redis-commander:latest
+        container_name: redis-commander
+        hostname: redis-commander
+        environment:
+            REDIS_HOSTS: redis
+            HTTP_USER: root
+            HTTP_PASSWORD: qwerty
+        ports:
+            - 9011:8081
+        depends_on:
+            - redis
+
+    seq:
+        image: datalust/seq:latest
+        container_name: seq
+        restart: unless-stopped
+        environment:
+            - ACCEPT_EULA=Y
+        ports:
+            - '81:80'
+            - '5341:5341'
+        volumes:
+            - seq-data:/data

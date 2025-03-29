@@ -1,0 +1,17 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"extends": "@repo/typescript/tsconfig.base.json",
+	"compilerOptions": {
+		"emitDecoratorMetadata": true,
+		"experimentalDecorators": true,
+		"target": "ES2022",
+		"noEmit": false,
+		"outDir": "./dist/",
+		"skipLibCheck": true,
+		"types": ["node", "jest"],
+		"baseUrl": "."
+	},
+	"include": ["./src/**/*.ts", "./test/**/*.ts"],
+	"exclude": ["./build", "./dist", "./node_modules"],
+	"references": [{ "path": "../core" }]
+}

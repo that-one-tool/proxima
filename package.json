@@ -1,0 +1,33 @@
+{
+	"name": "@that-one-tool/proxima",
+	"private": true,
+	"scripts": {
+		"build": "turbo build --filter=@that-one-tool/proxima-core && turbo build",
+		"build:force": "npm run build -- --force",
+		"check": "turbo build lint test",
+		"check:fix": "turbo build format lint:fix test",
+		"check:force": "turbo build lint test --force",
+		"clear:all": "npm run clear:build && npm run clear:turbo",
+		"clear:build": "turbo clear:build --force",
+		"clear:turbo": "turbo clear:turbo --force && rm -rf ./.turbo",
+		"format": "prettier --write \"**/*.{js,mjs,ts,tsx,md}\"",
+		"lint": "turbo lint",
+		"lint:fix": "turbo lint -- --fix",
+		"start:dependencies": "docker compose -f docker/docker-compose-dependencies.yml up -d",
+		"start:dev": "turbo start:dev",
+		"stop:dependencies": "docker compose -f docker/docker-compose-dependencies.yml down"
+	},
+	"packageManager": "npm@10.9.2",
+	"engines": {
+		"node": ">=22"
+	},
+	"workspaces": [
+		"config/*",
+		"packages/*"
+	],
+	"devDependencies": {
+		"prettier": "^3.5.3",
+		"turbo": "^2.4.4",
+		"typescript": "^5.7.2"
+	}
+}

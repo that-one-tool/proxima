@@ -1,0 +1,20 @@
+{
+	"extends": ["//"],
+	"tasks": {
+		"build": {
+			"env": [
+				"DEFAULT_LISTENING_PORT",
+				"DEFAULT_PORT_MAPPING",
+				"FORWARD_HOST",
+				"FORWARD_PORT",
+				"FORWARD_SERVICE_NAME",
+				"IP_BLACKLIST",
+				"IP_WHITELIST",
+				"PORT",
+				"PORT_MAPPING",
+				"TRUSTED_PORT",
+				"VERSION"
+			]
+		}
+	}
+}

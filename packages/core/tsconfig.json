@@ -1,0 +1,11 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"extends": "@repo/typescript/tsconfig.base.json",
+	"compilerOptions": {
+		"composite": true,
+		"skipLibCheck": true,
+		"types": ["node"]
+	},
+	"include": ["./src/**/*", "./test/**/*"],
+	"exclude": ["node_modules", "dist"]
+}

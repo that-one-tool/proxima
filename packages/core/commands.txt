@@ -1,0 +1,3 @@
+python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.connect(('127.0.0.1', 6780)); s.sendall(b'*2\r\n\$3\r\nGET\r\n\$5\r\njason\r\n'); response = s.recv(1024); print(response.decode()); s.close()"
+
+python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.connect(('127.0.0.1', 6380)); s.sendall(b'*3\r\n\$3\r\nSET\r\n\$5\r\njason\r\n\$3\r\nmoi\r\n'); response = s.recv(1024); print(response.decode()); s.close()"

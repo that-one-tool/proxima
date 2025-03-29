@@ -1,0 +1,20 @@
+{
+	"extends": ["//"],
+	"tasks": {
+		"build": {
+			"env": [
+				"DEFAULT_KEY_PREFIX",
+				"DEFAULT_LISTENING_PORT",
+				"IP_BLACKLIST",
+				"IP_WHITELIST",
+				"PORT",
+				"PORT_PREFIX_MAP",
+				"PROD",
+				"REDIS_HOST",
+				"REDIS_PORT",
+				"TRUSTED_PORT",
+				"VERSION"
+			]
+		}
+	}
+}
