@@ -3,3 +3,4 @@
 [ ] ProxyManager extends EventEmitter
 [ ] TLS
 [ ] Cleaner logging
+[ ] Finalize docker image
