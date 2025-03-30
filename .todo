@@ -1,5 +1,5 @@
 [x] Connection pool
 [x] Connection on forward service
-[ ] Connection pool on client port
 [ ] ProxyManager extends EventEmitter
 [ ] TLS
+[ ] Cleaner logging

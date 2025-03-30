@@ -15,30 +15,30 @@ export class ProxyManager {
 
 	constructor(config: Config) {
 		this.config = config;
-		this.serviceConnectionPool = this.initializeConnectionPool();
+		this.serviceConnectionPool = this.initializeServiceConnectionPool();
 	}
 
-	private initializeConnectionPool(): ConnectionPool {
+	private initializeServiceConnectionPool(): ConnectionPool {
 		const connectionPool = new ConnectionPool(this.config.forwardServiceOptions);
 
 		connectionPool.on('ready', () => {
-			console.log('Connection pool ready');
+			console.log('Service connection pool ready');
 		});
 
 		connectionPool.on('error', (error) => {
-			console.error('Connection pool error', error);
+			console.error('Service connection pool error', error);
 		});
 
 		connectionPool.on('connection', (data) => {
-			console.log('New connection created in pool', data);
+			console.log('New service connection created in pool', data);
 		});
 
 		connectionPool.on('connectionClosed', (data) => {
-			console.log('Connection closed in pool', data);
+			console.log('Service connection closed in pool', data);
 		});
 
 		connectionPool.on('connectionPoolFailure', async (data) => {
-			console.error('Connection pool failure. Exiting...', data);
+			console.error('Service connection pool critical failure. Exiting...', data);
 			await this.stopServers();
 		});
 
@@ -56,35 +56,38 @@ export class ProxyManager {
 	startServers(): void {
 		for (const [port, mapping] of Object.entries(this.config.portMapping)) {
 			const proxy = this.createServer(this.config, parseInt(port, 10), mapping);
+			this.proxies.set(port, proxy);
 
 			proxy.listen(port, () => {
-				console.log('=> Linked reverse proxy listening', { port, mapping });
+				console.log('=> Reverse proxy listening', { port, mapping });
 			});
 
 			proxy.on('close', () => {
 				console.log('=> Reverse proxy closed gracefully', { port, mapping });
-				this.proxies.delete(port);
-
-				if (this.proxies.size === 0) {
-					console.log('=> No reverse proxies left. Exiting...');
-					process.exit(0);
-				}
+				this.handleClosedProxy(port);
 			});
+		}
+	}
 
-			this.proxies.set(port, proxy);
+	async handleClosedProxy(port: string): Promise<void> {
+		this.proxies.delete(port);
+
+		if (this.proxies.size === 0) {
+			console.log('=> No reverse proxies left. Exiting...');
+			process.exit(0);
 		}
 	}
 
 	async stopServers(): Promise<void> {
+		await this.serviceConnectionPool.shutdown().catch((error) => {
+			console.error('Error shutting down service connection pool', error);
+		});
+
 		const ports = new Set<string>(this.proxies.keys());
 
 		for (const port of ports) {
 			this.stopServer(port);
 		}
-
-		await this.serviceConnectionPool.shutdown().catch((error) => {
-			console.error('Error shutting down service connection pool', error);
-		});
 	}
 
 	private createServer(config: Config, port: number, mapping: string) {
@@ -106,8 +109,9 @@ export class ProxyManager {
 		console.log('Client connection opened', { clientIp, port, mapping, requestId });
 
 		if (!this.isClientAllowedToConnect(config, clientIp)) {
-			console.warn('Client is not allowed to connect. Closing connection.', { requestId });
+			console.warn('Client is not allowed to connect. Closing connection...', { requestId });
 			clientSocket.end();
+			clientSocket.destroy();
 			return;
 		}
 
@@ -133,8 +137,15 @@ export class ProxyManager {
 				let dataToForward = data;
 
 				if (this.transformFromClient) {
-					dataToForward = this.transformFromClient(data, mapping);
-					console.log('Data from client transformed', { requestId });
+					try {
+						dataToForward = this.transformFromClient(data, mapping);
+						console.log('Data from client transformed', { requestId });
+					} catch (error) {
+						console.error(
+							'Error transforming data from client',
+							new ContextualError('Transform error', { cause: error, context: { requestId } }),
+						);
+					}
 				}
 
 				serviceSocket.write(dataToForward);
@@ -146,8 +157,15 @@ export class ProxyManager {
 				let dataToForward = data;
 
 				if (this.transformToClient) {
-					dataToForward = this.transformToClient(data, mapping);
-					console.log('Data from service transformed', { requestId });
+					try {
+						dataToForward = this.transformToClient(data, mapping);
+						console.log('Data from service transformed', { requestId });
+					} catch (error) {
+						console.error(
+							'Error transforming data from service',
+							new ContextualError('Transform error', { cause: error, context: { requestId } }),
+						);
+					}
 				}
 
 				clientSocket.write(dataToForward);
