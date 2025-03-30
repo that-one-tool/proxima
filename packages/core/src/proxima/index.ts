@@ -1,6 +1,6 @@
 import { Config, getConfig } from '../configuration';
 import { ProxyManager } from '../proxy-manager';
-import { TransformFunction } from '../types';
+import { TransformerFunction } from '../types';
 
 export class Proxima {
 	private config: Config;
@@ -11,9 +11,9 @@ export class Proxima {
 		this.proxyManager = new ProxyManager(this.config);
 	}
 
-	addTransformers(transformFromClient: TransformFunction, transformToClient: TransformFunction): Proxima {
-		this.proxyManager.setTransformFromClient(transformFromClient);
-		this.proxyManager.setTransformToClient(transformToClient);
+	addTransformers(fromClientTransformer: TransformerFunction, toClientTransformer: TransformerFunction): Proxima {
+		this.proxyManager.setFromClientTransformer(fromClientTransformer);
+		this.proxyManager.setToClientTransformer(toClientTransformer);
 
 		return this;
 	}

@@ -3,12 +3,12 @@ import net from 'node:net';
 import { Config } from '../configuration';
 import { ConnectionPool } from '../connection-pool';
 import { ContextualError } from '../errors';
-import { TransformFunction } from '../types';
+import { TransformerFunction } from '../types';
 
 export class ProxyManager {
 	private config: Config;
-	private transformFromClient: TransformFunction;
-	private transformToClient: TransformFunction;
+	private fromClientTransformer: TransformerFunction;
+	private toClientTransformer: TransformerFunction;
 	private serviceConnectionPool: ConnectionPool;
 
 	private readonly proxies: Map<string, net.Server> = new Map();
@@ -45,12 +45,12 @@ export class ProxyManager {
 		return connectionPool;
 	}
 
-	setTransformFromClient(transformFromClient: TransformFunction): void {
-		this.transformFromClient = transformFromClient;
+	setFromClientTransformer(transformFromClient: TransformerFunction): void {
+		this.fromClientTransformer = transformFromClient;
 	}
 
-	setTransformToClient(transformToClient: TransformFunction): void {
-		this.transformToClient = transformToClient;
+	setToClientTransformer(transformToClient: TransformerFunction): void {
+		this.toClientTransformer = transformToClient;
 	}
 
 	startServers(): void {
@@ -136,9 +136,9 @@ export class ProxyManager {
 				console.log('Received original data from client for service', { requestId });
 				let dataToForward = data;
 
-				if (this.transformFromClient) {
+				if (this.fromClientTransformer) {
 					try {
-						dataToForward = this.transformFromClient(data, mapping);
+						dataToForward = this.fromClientTransformer(data, mapping);
 						console.log('Data from client transformed', { requestId });
 					} catch (error) {
 						console.error(
@@ -156,9 +156,9 @@ export class ProxyManager {
 				console.log('Received data from service for client', { requestId });
 				let dataToForward = data;
 
-				if (this.transformToClient) {
+				if (this.toClientTransformer) {
 					try {
-						dataToForward = this.transformToClient(data, mapping);
+						dataToForward = this.toClientTransformer(data, mapping);
 						console.log('Data from service transformed', { requestId });
 					} catch (error) {
 						console.error(
