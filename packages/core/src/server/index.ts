@@ -1,8 +1,8 @@
-import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { ContextualError } from '../errors';
-import { TlsServerClientOptions } from './types';
+import { TlsServerClientOptions } from '../types';
+import { makeTlsOptions, validateOptions } from '../utils/tls';
 
 /**
  * Server class that encapsulates either a TCP or TLS server based on options
@@ -16,7 +16,7 @@ export class ServerBuilder {
 	 * @param options Server options
 	 */
 	constructor(options: TlsServerClientOptions) {
-		this.validateOptions(options);
+		validateOptions(options);
 		this.options = options;
 	}
 
@@ -49,57 +49,25 @@ export class ServerBuilder {
 	 * Create a TLS server
 	 */
 	private createTlsServer(listener: (socket: net.Socket) => void): tls.Server {
-		const tlsOptions = this.options.tlsOptions;
-
-		if (!tlsOptions) {
+		if (!this.options.tlsOptions) {
 			throw new ContextualError('TLS options must be provided for TLS server type');
 		}
 
 		try {
-			if (!fs.existsSync(tlsOptions.certPath)) {
-				throw new ContextualError('Certificate file not found', { context: { path: tlsOptions.certPath } });
-			}
-
-			if (!fs.existsSync(tlsOptions.keyPath)) {
-				throw new ContextualError('Private key file not found', { context: { path: tlsOptions.keyPath } });
-			}
-
-			const cert = fs.readFileSync(tlsOptions.certPath);
-			const key = fs.readFileSync(tlsOptions.keyPath);
-
-			let ca: Buffer | undefined;
-			if (tlsOptions.caPath && fs.existsSync(tlsOptions.caPath)) {
-				ca = fs.readFileSync(tlsOptions.caPath);
-			}
+			const tlsOptions = makeTlsOptions(this.options.tlsOptions);
 
 			return tls.createServer(
 				{
-					cert,
-					key,
-					ca: ca ? [ca] : undefined,
-					requestCert: tlsOptions.requestCert,
-					rejectUnauthorized: tlsOptions.rejectUnauthorized,
+					cert: tlsOptions.cert,
+					key: tlsOptions.key,
+					ca: tlsOptions.ca,
+					requestCert: this.options.tlsOptions.requestCert,
+					rejectUnauthorized: this.options.tlsOptions.rejectUnauthorized,
 				},
 				listener,
 			);
 		} catch (error) {
 			throw new ContextualError('Failed to create TLS server', { cause: error });
-		}
-	}
-
-	/**
-	 * Validate the server options
-	 */
-	private validateOptions(options: TlsServerClientOptions): void {
-		if (options.useTls) {
-			const hasCertPath = this.options.tlsOptions?.certPath;
-			const hasKeyPath = this.options.tlsOptions?.keyPath;
-
-			if (!hasCertPath || !hasKeyPath) {
-				throw new ContextualError(
-					'TLS_SERVER_CERT_PATH and TLS_SERVER_KEY_PATH environment variables must be set to use a TLS server',
-				);
-			}
 		}
 	}
 }

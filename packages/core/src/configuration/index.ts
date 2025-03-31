@@ -1,5 +1,5 @@
 import { ForwardServiceOptions } from '../connection-pool/types';
-import { TlsServerClientOptions } from '../server/types';
+import { TlsServerClientOptions } from '../types';
 
 export interface Config {
 	ipBlacklist: string[];

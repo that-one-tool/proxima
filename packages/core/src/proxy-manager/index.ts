@@ -20,7 +20,7 @@ export class ProxyManager {
 	}
 
 	private initializeServiceConnectionPool(): ConnectionPool {
-		const connectionPool = new ConnectionPool(this.config.forwardServiceOptions);
+		const connectionPool = new ConnectionPool(this.config.forwardServiceOptions, this.config.tlsClientOptions);
 
 		connectionPool.on('ready', () => {
 			console.log('Service connection pool ready');

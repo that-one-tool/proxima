@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import net from 'node:net';
+import * as net from 'node:net';
+import * as tls from 'node:tls';
 import { ConnectionPoolError } from '../errors';
-import { ForwardServiceOptions, ConnectionStatus, PoolConnection, PoolStats } from './types';
+import { TlsServerClientOptions } from '../types';
+import { makeTlsOptions, validateOptions } from '../utils/tls';
+import { ConnectionStatus, ForwardServiceOptions, PoolConnection, PoolStats } from './types';
 
 export class ConnectionPool extends EventEmitter {
 	private options: Required<ForwardServiceOptions>;
+	private tlsClientOptions: TlsServerClientOptions;
 	private connections: Map<string, PoolConnection> = new Map();
 	private waitingQueue: Array<(connection: PoolConnection | null) => void> = [];
 	private cleanupTimer: NodeJS.Timeout | null = null;
@@ -15,7 +19,7 @@ export class ConnectionPool extends EventEmitter {
 	private maxRetries = 5;
 	private isShuttingDown = false;
 
-	constructor(options: ForwardServiceOptions) {
+	constructor(options: ForwardServiceOptions, tlsClientOptions: TlsServerClientOptions) {
 		super();
 
 		if (!options.host) {
@@ -26,10 +30,12 @@ export class ConnectionPool extends EventEmitter {
 			throw new ConnectionPoolError('Port is required');
 		}
 
+		validateOptions(tlsClientOptions);
+
 		this.options = {
 			host: options.host,
 			port: options.port,
-			name: options.name,
+			name: options.name || 'default',
 			minPoolConnections: options.minPoolConnections ?? 0,
 			maxPoolConnections: options.maxPoolConnections ?? 10,
 			idleConnectionTimeoutMs: options.idleConnectionTimeoutMs ?? 30000,
@@ -37,6 +43,11 @@ export class ConnectionPool extends EventEmitter {
 			acquireConnectionTimeoutMs: options.acquireConnectionTimeoutMs ?? 5000,
 		};
 
+		this.tlsClientOptions = tlsClientOptions;
+
+		console.log(
+			`Initializing ${this.tlsClientOptions.useTls ? 'TLS' : 'TCP'} connection pool to ${this.options.host}:${this.options.port}`,
+		);
 		void this.initialize();
 	}
 
@@ -207,8 +218,20 @@ export class ConnectionPool extends EventEmitter {
 		return new Promise((resolve, reject) => {
 			try {
 				const id = `C-${randomUUID().slice(24)}`;
-				const socket = net.createConnection(this.options.port, this.options.host);
+				let socket: net.Socket;
 				++this.connectionCounter;
+
+				// Create either a TLS or TCP connection based on useTls flag
+				if (this.tlsClientOptions.useTls) {
+					if (!this.tlsClientOptions.tlsOptions) {
+						throw new ConnectionPoolError('TLS options must be provided for TLS connection type');
+					}
+
+					const tlsOptions = makeTlsOptions(this.tlsClientOptions.tlsOptions);
+					socket = tls.connect(this.options.port, this.options.host, tlsOptions);
+				} else {
+					socket = net.createConnection(this.options.port, this.options.host);
+				}
 
 				const connection: PoolConnection = {
 					id,
