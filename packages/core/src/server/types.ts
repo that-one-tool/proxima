@@ -1,6 +1,6 @@
-export enum ServerType {
-	TCP = 'tcp',
-	TLS = 'tls',
+export interface TlsServerClientOptions {
+	useTls?: boolean;
+	tlsOptions?: TlsOptions;
 }
 
 export interface TlsOptions {
@@ -9,9 +9,4 @@ export interface TlsOptions {
 	caPath?: string;
 	requestCert?: boolean;
 	rejectUnauthorized?: boolean;
-}
-
-export interface ServerOptions {
-	type: ServerType;
-	tlsOptions?: TlsOptions;
 }

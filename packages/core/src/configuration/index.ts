@@ -1,10 +1,13 @@
 import { ForwardServiceOptions } from '../connection-pool/types';
+import { TlsServerClientOptions } from '../server/types';
 
 export interface Config {
 	ipBlacklist: string[];
 	ipWhitelist: string[];
 	portMapping: Record<number, string>;
 	forwardServiceOptions: ForwardServiceOptions;
+	tlsClientOptions: TlsServerClientOptions;
+	tlsServerOptions: TlsServerClientOptions;
 	trustedPort: number;
 	version: string;
 }
@@ -17,7 +20,8 @@ export function getConfig(): Config {
 		const portMapping = getPortMapping();
 
 		const forwardServiceOptions = getForwardServiceOptions();
-
+		const tlsServerOptions = getTlsServerOptions();
+		const tlsClientOptions = getTlsClientOptions();
 		const trustedPort = parseInt(process.env.TRUSTED_PORT ?? '9101', 10);
 		const version = process.env.VERSION ?? 'unknown';
 
@@ -26,6 +30,8 @@ export function getConfig(): Config {
 			ipWhitelist,
 			portMapping,
 			forwardServiceOptions,
+			tlsClientOptions,
+			tlsServerOptions,
 			trustedPort,
 			version,
 		};
@@ -33,6 +39,19 @@ export function getConfig(): Config {
 		console.error('Error parsing environment variables', error);
 		process.exit(1);
 	}
+}
+
+function getForwardServiceOptions(): ForwardServiceOptions {
+	return {
+		host: process.env.FORWARD_SERVICE_HOST || '127.0.0.1',
+		port: parseInt(process.env.FORWARD_SERVICE_PORT ?? '6379', 10),
+		name: process.env.FORWARD_SERVICE_NAME || 'unknown-forward-service',
+		minPoolConnections: parseInt(process.env.FORWARD_SERVICE_MIN_POOL_CONNECTIONS || '5', 10),
+		maxPoolConnections: parseInt(process.env.FORWARD_SERVICE_MAX_POOL_CONNECTIONS || '20', 10),
+		idleConnectionTimeoutMs: parseInt(process.env.FORWARD_SERVICE_IDLE_CONNECTION_TIMEOUT_MS || '30000', 10),
+		connectionCleanupIntervalMs: parseInt(process.env.FORWARD_SERVICE_CONNECTION_CLEANUP_INTERVAL_MS || '30000', 10),
+		acquireConnectionTimeoutMs: parseInt(process.env.FORWARD_SERVICE_ACQUIRE_CONNECTION_TIMEOUT_MS || '5000', 10),
+	};
 }
 
 function getPortMapping(): Record<number, string> {
@@ -64,15 +83,26 @@ function getPortMapping(): Record<number, string> {
 	return portMapping;
 }
 
-function getForwardServiceOptions(): ForwardServiceOptions {
+function getTlsClientOptions(): TlsServerClientOptions {
 	return {
-		host: process.env.FORWARD_SERVICE_HOST || '127.0.0.1',
-		port: parseInt(process.env.FORWARD_SERVICE_PORT ?? '6379', 10),
-		name: process.env.FORWARD_SERVICE_NAME || 'unknown-forward-service',
-		minPoolConnections: parseInt(process.env.FORWARD_SERVICE_MIN_POOL_CONNECTIONS || '5', 10),
-		maxPoolConnections: parseInt(process.env.FORWARD_SERVICE_MAX_POOL_CONNECTIONS || '20', 10),
-		idleConnectionTimeoutMs: parseInt(process.env.FORWARD_SERVICE_IDLE_CONNECTION_TIMEOUT_MS || '30000', 10),
-		connectionCleanupIntervalMs: parseInt(process.env.FORWARD_SERVICE_CONNECTION_CLEANUP_INTERVAL_MS || '30000', 10),
-		acquireConnectionTimeoutMs: parseInt(process.env.FORWARD_SERVICE_ACQUIRE_CONNECTION_TIMEOUT_MS || '5000', 10),
+		useTls: process.env.TLS_CLIENT_ENABLED === 'true',
+		tlsOptions: {
+			certPath: process.env.TLS_CLIENT_CERT_PATH || '',
+			keyPath: process.env.TLS_CLIENT_KEY_PATH || '',
+			caPath: process.env.TLS_CLIENT_CA_PATH || '',
+		},
+	};
+}
+
+function getTlsServerOptions(): TlsServerClientOptions {
+	return {
+		useTls: process.env.TLS_SERVER_ENABLED === 'true',
+		tlsOptions: {
+			certPath: process.env.TLS_SERVER_CERT_PATH || '',
+			keyPath: process.env.TLS_SERVER_KEY_PATH || '',
+			caPath: process.env.TLS_SERVER_CA_PATH || '',
+			requestCert: process.env.TLS_SERVER_REQUEST_CERT === 'true',
+			rejectUnauthorized: process.env.TLS_SERVER_REJECT_UNAUTHORIZED === 'true',
+		},
 	};
 }

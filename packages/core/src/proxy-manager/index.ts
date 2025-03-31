@@ -3,6 +3,7 @@ import net from 'node:net';
 import { Config } from '../configuration';
 import { ConnectionPool } from '../connection-pool';
 import { ContextualError } from '../errors';
+import { ServerBuilder } from '../server';
 import { TransformerFunction } from '../types';
 
 export class ProxyManager {
@@ -55,7 +56,8 @@ export class ProxyManager {
 
 	startServers(): void {
 		for (const [port, mapping] of Object.entries(this.config.portMapping)) {
-			const proxy = this.createServer(this.config, parseInt(port, 10), mapping);
+			const serverBuilder = new ServerBuilder(this.config.tlsServerOptions);
+			const proxy = this.initializeServer(serverBuilder, this.config, parseInt(port, 10), mapping);
 			this.proxies.set(port, proxy);
 
 			proxy.listen(port, () => {
@@ -86,12 +88,13 @@ export class ProxyManager {
 		const ports = new Set<string>(this.proxies.keys());
 
 		for (const port of ports) {
+			console.log('Stopping server', { port });
 			this.stopServer(port);
 		}
 	}
 
-	private createServer(config: Config, port: number, mapping: string) {
-		return net.createServer((clientSocket) => {
+	private initializeServer(serverBuilder: ServerBuilder, config: Config, port: number, mapping: string) {
+		return serverBuilder.createServer((clientSocket) => {
 			void this.listenConnection(config, clientSocket, port, mapping);
 		});
 	}
@@ -212,7 +215,5 @@ export class ProxyManager {
 				console.error('An error occured while stopping the server', { port, error });
 			}
 		});
-
-		this.proxies.delete(port);
 	}
 }
