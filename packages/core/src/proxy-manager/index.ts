@@ -3,7 +3,7 @@ import net from 'node:net';
 import { Config } from '../configuration';
 import { ConnectionPool } from '../connection-pool';
 import { ContextualError } from '../errors';
-import { ServerBuilder } from '../server';
+import { ServerBuilder } from '../servers/tcp-tls-server-builder';
 import { TransformerFunction } from '../types';
 
 export class ProxyManager {

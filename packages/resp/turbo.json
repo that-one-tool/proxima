@@ -16,7 +16,7 @@
 				"IP_BLACKLIST",
 				"IP_WHITELIST",
 				"PORT_MAPPING",
-				"TRUSTED_PORT",
+				"TRUSTED_HTTP_PORT",
 				"VERSION"
 			]
 		}

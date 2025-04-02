@@ -2,6 +2,7 @@
 [x] Connection on forward service
 [x] TLS Server used by ProxyManager
 [x] TLS Client (connect) in ConnectionPool
+[x] Healthcheck and Metrics minimal http server
 [ ] ProxyManager extends EventEmitter
 [ ] Cleaner logging
 [ ] Finalize docker image

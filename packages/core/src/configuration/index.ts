@@ -8,7 +8,7 @@ export interface Config {
 	forwardServiceOptions: ForwardServiceOptions;
 	tlsClientOptions: TlsServerClientOptions;
 	tlsServerOptions: TlsServerClientOptions;
-	trustedPort: number;
+	trustedHttpPort: number;
 	version: string;
 }
 
@@ -22,7 +22,7 @@ export function getConfig(): Config {
 		const forwardServiceOptions = getForwardServiceOptions();
 		const tlsServerOptions = getTlsServerOptions();
 		const tlsClientOptions = getTlsClientOptions();
-		const trustedPort = parseInt(process.env.TRUSTED_PORT ?? '9101', 10);
+		const trustedHttpPort = parseInt(process.env.TRUSTED_HTTP_PORT ?? '9101', 10);
 		const version = process.env.VERSION ?? 'unknown';
 
 		return {
@@ -32,7 +32,7 @@ export function getConfig(): Config {
 			forwardServiceOptions,
 			tlsClientOptions,
 			tlsServerOptions,
-			trustedPort,
+			trustedHttpPort,
 			version,
 		};
 	} catch (error) {

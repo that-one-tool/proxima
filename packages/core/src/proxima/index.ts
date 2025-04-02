@@ -1,14 +1,17 @@
 import { Config, getConfig } from '../configuration';
 import { ProxyManager } from '../proxy-manager';
+import { HttpServer } from '../servers/http-server';
 import { TransformerFunction } from '../types';
 
 export class Proxima {
 	private config: Config;
 	private proxyManager: ProxyManager;
+	private httpServer: HttpServer;
 
 	constructor() {
 		this.config = getConfig();
 		this.proxyManager = new ProxyManager(this.config);
+		this.httpServer = new HttpServer(this.config.trustedHttpPort, this.config.version);
 	}
 
 	addTransformers(fromClientTransformer: TransformerFunction, toClientTransformer: TransformerFunction): Proxima {
@@ -28,16 +31,24 @@ export class Proxima {
 				`Forwarding to ${this.config.forwardServiceOptions.name} at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
 			);
 
-			return this;
+			this.httpServer.start();
+
+			console.log(`HTTP server listening on port ${this.config.trustedHttpPort} for healthcheck and metrics`);
 		} catch (error) {
 			console.error(error);
-			this.proxyManager.stopServers();
-			process.exit(1);
+			this.handleShutdown(1);
 		}
+
+		return this;
 	}
 
 	async stop(): Promise<void> {
+		await this.handleShutdown(0);
+	}
+
+	private async handleShutdown(exitCode: number): Promise<void> {
 		await this.proxyManager.stopServers();
-		process.exit(0);
+		this.httpServer.stop();
+		process.exit(exitCode);
 	}
 }
