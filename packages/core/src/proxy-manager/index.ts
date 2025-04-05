@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import { Config } from '../configuration';
 import { ConnectionPool } from '../connection-pool';
@@ -6,7 +7,7 @@ import { ContextualError } from '../errors';
 import { ServerBuilder } from '../servers/tcp-tls-server-builder';
 import { TransformerFunction } from '../types';
 
-export class ProxyManager {
+export class ProxyManager extends EventEmitter {
 	private config: Config;
 	private fromClientTransformer: TransformerFunction;
 	private toClientTransformer: TransformerFunction;
@@ -15,6 +16,8 @@ export class ProxyManager {
 	private readonly proxies: Map<string, net.Server> = new Map();
 
 	constructor(config: Config) {
+		super();
+
 		this.config = config;
 		this.serviceConnectionPool = this.initializeServiceConnectionPool();
 	}
@@ -39,8 +42,8 @@ export class ProxyManager {
 		});
 
 		connectionPool.on('connectionPoolFailure', async (data) => {
-			console.error('Service connection pool critical failure. Exiting...', data);
-			await this.stopServers();
+			console.error('Service connection pool critical failure', data);
+			this.emit('failure');
 		});
 
 		return connectionPool;
@@ -69,14 +72,15 @@ export class ProxyManager {
 				this.handleClosedProxy(port);
 			});
 		}
+
+		this.emit('ready');
 	}
 
 	async handleClosedProxy(port: string): Promise<void> {
 		this.proxies.delete(port);
 
 		if (this.proxies.size === 0) {
-			console.log('=> No reverse proxies left. Exiting...');
-			process.exit(0);
+			this.emit('closed');
 		}
 	}
 

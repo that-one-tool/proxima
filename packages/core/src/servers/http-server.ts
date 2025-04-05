@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { Server } from 'node:http';
 import * as client from 'prom-client';
 
@@ -7,13 +8,15 @@ enum MetricLabel {
 	STATUS_CODE = 'status_code',
 }
 
-export class HttpServer {
+export class HttpServer extends EventEmitter {
 	private readonly server: Server;
 	private readonly port: number;
 	private readonly register: client.Registry;
 	private readonly version: string;
 
 	constructor(port: number, version: string) {
+		super();
+
 		this.port = port;
 		this.version = version;
 		this.register = this.makeInitializedRegister();
@@ -25,13 +28,15 @@ export class HttpServer {
 
 	public start(): void {
 		this.server.listen(this.port, () => {
-			console.log(`HTTP server listening on port ${this.port}`);
+			console.log(`HTTP server listening on port ${this.port} for healthcheck and metrics`);
+			this.emit('ready');
 		});
 	}
 
 	public stop(): void {
 		this.server.close(() => {
 			console.log('HTTP server stopped');
+			this.emit('closed');
 		});
 	}
 

@@ -16,7 +16,6 @@ export class ConnectionPool extends EventEmitter {
 	private connectionCounter = 0;
 	private isWaitingToRetry = false;
 	private retryCount = 0;
-	private maxRetries = 5;
 	private isShuttingDown = false;
 
 	constructor(options: ForwardServiceOptions, tlsClientOptions: TlsServerClientOptions) {
@@ -41,6 +40,7 @@ export class ConnectionPool extends EventEmitter {
 			idleConnectionTimeoutMs: options.idleConnectionTimeoutMs ?? 30000,
 			connectionCleanupIntervalMs: options.connectionCleanupIntervalMs ?? 30000,
 			acquireConnectionTimeoutMs: options.acquireConnectionTimeoutMs ?? 5000,
+			maxRetries: options.maxRetries ?? 3,
 		};
 
 		this.tlsClientOptions = tlsClientOptions;
@@ -277,7 +277,7 @@ export class ConnectionPool extends EventEmitter {
 		const stats = this.getStats();
 		const isConnectionPoolStateHealthy = stats.total >= stats.minConnections && !this.isShuttingDown;
 		const isConnectionPoolStateDegraded = stats.total < stats.minConnections && !this.isShuttingDown;
-		const canRetryRestoringConnectionPool = this.retryCount < this.maxRetries;
+		const canRetryRestoringConnectionPool = this.retryCount < this.options.maxRetries;
 
 		if (!isConnectionPoolStateHealthy && !canRetryRestoringConnectionPool) {
 			this.emit('connectionPoolFailure', new ConnectionPoolError('Failed to recover connection pool'));
@@ -289,7 +289,9 @@ export class ConnectionPool extends EventEmitter {
 			this.isWaitingToRetry = true;
 			const backoffDelay = Math.min(1000 * Math.pow(2, this.retryCount), 30000);
 
-			console.log(`Attempting to recover connection pool (retry ${this.retryCount}/${this.maxRetries}) after ${backoffDelay}ms`);
+			console.log(
+				`Attempting to recover connection pool (retry ${this.retryCount}/${this.options.maxRetries}) after ${backoffDelay}ms`,
+			);
 
 			setTimeout(() => {
 				console.log(`Retry ${this.retryCount}: Attempting to reinitialize connections`);

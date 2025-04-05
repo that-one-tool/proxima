@@ -51,6 +51,7 @@ function getForwardServiceOptions(): ForwardServiceOptions {
 		idleConnectionTimeoutMs: parseInt(process.env.FORWARD_SERVICE_IDLE_CONNECTION_TIMEOUT_MS || '30000', 10),
 		connectionCleanupIntervalMs: parseInt(process.env.FORWARD_SERVICE_CONNECTION_CLEANUP_INTERVAL_MS || '30000', 10),
 		acquireConnectionTimeoutMs: parseInt(process.env.FORWARD_SERVICE_ACQUIRE_CONNECTION_TIMEOUT_MS || '5000', 10),
+		maxRetries: parseInt(process.env.FORWARD_SERVICE_MAX_RETRIES || '3', 10),
 	};
 }
 

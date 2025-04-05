@@ -22,6 +22,7 @@ export interface ForwardServiceOptions {
 	idleConnectionTimeoutMs?: number;
 	connectionCleanupIntervalMs?: number;
 	acquireConnectionTimeoutMs?: number;
+	maxRetries?: number;
 }
 
 export interface PoolStats {

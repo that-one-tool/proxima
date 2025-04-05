@@ -25,15 +25,27 @@ export class Proxima {
 		try {
 			console.log('Starting Proxima...');
 
-			this.proxyManager.startServers();
+			this.proxyManager.on('ready', () => {
+				console.log(
+					`Forwarding to ${this.config.forwardServiceOptions.name} at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
+				);
+			});
 
-			console.log(
-				`Forwarding to ${this.config.forwardServiceOptions.name} at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
-			);
+			this.proxyManager.on('closed', () => {
+				console.log('No reverse proxies left. Exiting...');
+				this.httpServer.on('closed', () => {
+					process.exit(0);
+				});
+				this.httpServer.stop();
+			});
+
+			this.proxyManager.on('failure', () => {
+				console.log('Service connection pool critical failure. Exiting...');
+				this.handleShutdown(1);
+			});
 
 			this.httpServer.start();
-
-			console.log(`HTTP server listening on port ${this.config.trustedHttpPort} for healthcheck and metrics`);
+			this.proxyManager.startServers();
 		} catch (error) {
 			console.error(error);
 			this.handleShutdown(1);
@@ -48,7 +60,9 @@ export class Proxima {
 
 	private async handleShutdown(exitCode: number): Promise<void> {
 		await this.proxyManager.stopServers();
+		this.httpServer.on('closed', () => {
+			process.exit(exitCode);
+		});
 		this.httpServer.stop();
-		process.exit(exitCode);
 	}
 }
