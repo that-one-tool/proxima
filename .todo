@@ -4,5 +4,5 @@
 [x] TLS Client (connect) in ConnectionPool
 [x] Healthcheck and Metrics minimal http server
 [x] ProxyManager extends EventEmitter
-[ ] Cleaner logging
+[x] Cleaner logging
 [ ] Finalize docker image

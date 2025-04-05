@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { ConnectionPoolError } from '../errors';
+import { Logger } from '../logging';
 import { TlsServerClientOptions } from '../types';
 import { makeTlsOptions, validateOptions } from '../utils/tls';
 import { ConnectionStatus, ForwardServiceOptions, PoolConnection, PoolStats } from './types';
@@ -17,6 +18,7 @@ export class ConnectionPool extends EventEmitter {
 	private isWaitingToRetry = false;
 	private retryCount = 0;
 	private isShuttingDown = false;
+	private logger: Logger;
 
 	constructor(options: ForwardServiceOptions, tlsClientOptions: TlsServerClientOptions) {
 		super();
@@ -44,9 +46,10 @@ export class ConnectionPool extends EventEmitter {
 		};
 
 		this.tlsClientOptions = tlsClientOptions;
+		this.logger = Logger.getInstance();
 
-		console.log(
-			`Initializing ${this.tlsClientOptions.useTls ? 'TLS' : 'TCP'} connection pool to ${this.options.host}:${this.options.port}`,
+		this.logger.info(
+			`[ConnectionPool] Initializing ${this.tlsClientOptions.useTls ? 'TLS' : 'TCP'} connection pool to ${this.options.host}:${this.options.port}`,
 		);
 		void this.initialize();
 	}
@@ -182,7 +185,7 @@ export class ConnectionPool extends EventEmitter {
 		try {
 			await this.reinitializeMinConnections();
 		} catch (error) {
-			console.error(`Failed to reinitialize connections on retry ${this.retryCount}`, error);
+			this.logger.error(`[ConnectionPool] Failed to reinitialize connections on retry ${this.retryCount}`, { error });
 			this.handleConnectionPoolError();
 		}
 	}
@@ -289,12 +292,12 @@ export class ConnectionPool extends EventEmitter {
 			this.isWaitingToRetry = true;
 			const backoffDelay = Math.min(1000 * Math.pow(2, this.retryCount), 30000);
 
-			console.log(
-				`Attempting to recover connection pool (retry ${this.retryCount}/${this.options.maxRetries}) after ${backoffDelay}ms`,
+			this.logger.info(
+				`[ConnectionPool] Attempting to recover connection pool (retry ${this.retryCount}/${this.options.maxRetries}) after ${backoffDelay}ms`,
 			);
 
 			setTimeout(() => {
-				console.log(`Retry ${this.retryCount}: Attempting to reinitialize connections`);
+				this.logger.info(`[ConnectionPool] Retry ${this.retryCount}: Attempting to reinitialize connections`);
 				void this.attemptReinitialization();
 			}, backoffDelay);
 		}
@@ -320,14 +323,14 @@ export class ConnectionPool extends EventEmitter {
 			const currentCount = this.connections.size;
 			const neededConnections = Math.max(0, this.options.minPoolConnections - currentCount);
 
-			console.log(
-				`Reinitializing connections. Current: ${currentCount}, Minimum required: ${this.options.minPoolConnections}, Creating: ${neededConnections}`,
+			this.logger.info(
+				`[ConnectionPool] Reinitializing connections. Current: ${currentCount}, Minimum required: ${this.options.minPoolConnections}, Creating: ${neededConnections}`,
 			);
 
 			await this.createMultipleConnections(neededConnections);
 
 			this.retryCount = 0;
-			console.log(`Successfully reinitialized connections. Current pool size: ${this.connections.size}`);
+			this.logger.info(`[ConnectionPool] Successfully reinitialized connections. Current pool size: ${this.connections.size}`);
 		} catch (error) {
 			throw new ConnectionPoolError('Failed to reinitialize minimum connections', { cause: error });
 		}

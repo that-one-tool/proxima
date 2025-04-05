@@ -1,4 +1,6 @@
 import { Config, getConfig } from '../configuration';
+import { Logger } from '../logging';
+import { LoggerOptions } from '../logging/types';
 import { ProxyManager } from '../proxy-manager';
 import { HttpServer } from '../servers/http-server';
 import { TransformerFunction } from '../types';
@@ -7,11 +9,17 @@ export class Proxima {
 	private config: Config;
 	private proxyManager: ProxyManager;
 	private httpServer: HttpServer;
+	private logger: Logger;
 
-	constructor() {
+	constructor(options?: LoggerOptions) {
+		this.logger = Logger.getInstance(options);
+
 		this.config = getConfig();
+		this.logger.debug('[Proxima] Config loaded', { config: this.config });
+
 		this.proxyManager = new ProxyManager(this.config);
 		this.httpServer = new HttpServer(this.config.trustedHttpPort, this.config.version);
+		this.logger.info('[Proxima] Proxima initialized');
 	}
 
 	addTransformers(fromClientTransformer: TransformerFunction, toClientTransformer: TransformerFunction): Proxima {
@@ -23,16 +31,17 @@ export class Proxima {
 
 	start(): Proxima {
 		try {
-			console.log('Starting Proxima...');
+			this.logger.info('[Proxima] Starting Proxima servers...');
 
 			this.proxyManager.on('ready', () => {
-				console.log(
-					`Forwarding to ${this.config.forwardServiceOptions.name} at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
+				this.logger.info(
+					`[Proxima] Forwarding to ${this.config.forwardServiceOptions.name} ` +
+						`at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
 				);
 			});
 
 			this.proxyManager.on('closed', () => {
-				console.log('No reverse proxies left. Exiting...');
+				this.logger.info('[Proxima] No reverse proxies left. Exiting...');
 				this.httpServer.on('closed', () => {
 					process.exit(0);
 				});
@@ -40,14 +49,14 @@ export class Proxima {
 			});
 
 			this.proxyManager.on('failure', () => {
-				console.log('Service connection pool critical failure. Exiting...');
+				this.logger.info('[Proxima] Service connection pool critical failure. Exiting...');
 				this.handleShutdown(1);
 			});
 
 			this.httpServer.start();
 			this.proxyManager.startServers();
 		} catch (error) {
-			console.error(error);
+			this.logger.error('[Proxima] An unexpected exception occured', { error });
 			this.handleShutdown(1);
 		}
 

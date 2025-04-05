@@ -4,6 +4,7 @@ import net from 'node:net';
 import { Config } from '../configuration';
 import { ConnectionPool } from '../connection-pool';
 import { ContextualError } from '../errors';
+import { Logger } from '../logging';
 import { ServerBuilder } from '../servers/tcp-tls-server-builder';
 import { TransformerFunction } from '../types';
 
@@ -12,6 +13,7 @@ export class ProxyManager extends EventEmitter {
 	private fromClientTransformer: TransformerFunction;
 	private toClientTransformer: TransformerFunction;
 	private serviceConnectionPool: ConnectionPool;
+	private logger: Logger;
 
 	private readonly proxies: Map<string, net.Server> = new Map();
 
@@ -19,6 +21,7 @@ export class ProxyManager extends EventEmitter {
 		super();
 
 		this.config = config;
+		this.logger = Logger.getInstance();
 		this.serviceConnectionPool = this.initializeServiceConnectionPool();
 	}
 
@@ -26,23 +29,23 @@ export class ProxyManager extends EventEmitter {
 		const connectionPool = new ConnectionPool(this.config.forwardServiceOptions, this.config.tlsClientOptions);
 
 		connectionPool.on('ready', () => {
-			console.log('Service connection pool ready');
+			this.logger.info('[ProxyManager] Service connection pool ready');
 		});
 
 		connectionPool.on('error', (error) => {
-			console.error('Service connection pool error', error);
+			this.logger.error('[ProxyManager] Service connection pool error', error);
 		});
 
 		connectionPool.on('connection', (data) => {
-			console.log('New service connection created in pool', data);
+			this.logger.info('[ProxyManager] New service connection created in pool', data);
 		});
 
 		connectionPool.on('connectionClosed', (data) => {
-			console.log('Service connection closed in pool', data);
+			this.logger.info('[ProxyManager] Service connection closed in pool', data);
 		});
 
 		connectionPool.on('connectionPoolFailure', async (data) => {
-			console.error('Service connection pool critical failure', data);
+			this.logger.error('[ProxyManager] Service connection pool critical failure', data);
 			this.emit('failure');
 		});
 
@@ -64,11 +67,11 @@ export class ProxyManager extends EventEmitter {
 			this.proxies.set(port, proxy);
 
 			proxy.listen(port, () => {
-				console.log('=> Reverse proxy listening', { port, mapping });
+				this.logger.info('[ProxyManager] Reverse proxy listening', { port, mapping });
 			});
 
 			proxy.on('close', () => {
-				console.log('=> Reverse proxy closed gracefully', { port, mapping });
+				this.logger.info('[ProxyManager] Reverse proxy closed gracefully', { port, mapping });
 				this.handleClosedProxy(port);
 			});
 		}
@@ -86,13 +89,13 @@ export class ProxyManager extends EventEmitter {
 
 	async stopServers(): Promise<void> {
 		await this.serviceConnectionPool.shutdown().catch((error) => {
-			console.error('Error shutting down service connection pool', error);
+			this.logger.error('[ProxyManager] Error shutting down service connection pool', error);
 		});
 
 		const ports = new Set<string>(this.proxies.keys());
 
 		for (const port of ports) {
-			console.log('Stopping server', { port });
+			this.logger.info('[ProxyManager] Stopping server', { port });
 			this.stopServer(port);
 		}
 	}
@@ -113,22 +116,22 @@ export class ProxyManager extends EventEmitter {
 		const requestId = randomUUID();
 		const clientIp = clientSocket.remoteAddress?.replace('::ffff:', '');
 
-		console.log('Client connection opened', { clientIp, port, mapping, requestId });
+		this.logger.info('[ProxyManager] Client connection opened', { clientIp, port, mapping, requestId });
 
 		if (!this.isClientAllowedToConnect(config, clientIp)) {
-			console.warn('Client is not allowed to connect. Closing connection...', { requestId });
+			this.logger.warn('[ProxyManager] Client is not allowed to connect. Closing connection...', { requestId });
 			clientSocket.end();
 			clientSocket.destroy();
 			return;
 		}
 
-		console.log('Client connected', { requestId });
+		this.logger.info('[ProxyManager] Client connected', { requestId });
 
 		try {
 			const serviceConnexion = await this.serviceConnectionPool.getConnection();
 
 			if (!serviceConnexion) {
-				console.error('Failed to acquire a connection from pool', { requestId });
+				this.logger.error('[ProxyManager] Failed to acquire a connection from pool', { requestId });
 				clientSocket.end();
 				return;
 			}
@@ -136,77 +139,78 @@ export class ProxyManager extends EventEmitter {
 			const connectionId = serviceConnexion.id;
 			const serviceSocket = serviceConnexion.socket;
 
-			console.log('Using pooled connection to service for client', { requestId, connectionId });
+			this.logger.info('[ProxyManager] Using pooled connection to service for client', { requestId, connectionId });
 
 			// Handle sockets data
 			clientSocket.on('data', (data: Buffer) => {
-				console.log('Received original data from client for service', { requestId });
+				this.logger.info('[ProxyManager] Received original data from client for service', { requestId });
 				let dataToForward = data;
 
 				if (this.fromClientTransformer) {
 					try {
 						dataToForward = this.fromClientTransformer(data, mapping);
-						console.log('Data from client transformed', { requestId });
+						this.logger.info('[ProxyManager] Data from client transformed', { requestId });
 					} catch (error) {
-						console.error(
-							'Error transforming data from client',
-							new ContextualError('Transform error', { cause: error, context: { requestId } }),
-						);
+						this.logger.error('[ProxyManager] Error transforming data from client', {
+							error: new ContextualError('Transform error', { cause: error, context: { requestId } }),
+						});
 					}
 				}
 
 				serviceSocket.write(dataToForward);
-				console.log('Data sent to service for client', { requestId });
+				this.logger.info('[ProxyManager] Data sent to service for client', { requestId });
 			});
 
 			serviceSocket.on('data', (data: Buffer) => {
-				console.log('Received data from service for client', { requestId });
+				this.logger.info('[ProxyManager] Received data from service for client', { requestId });
 				let dataToForward = data;
 
 				if (this.toClientTransformer) {
 					try {
 						dataToForward = this.toClientTransformer(data, mapping);
-						console.log('Data from service transformed', { requestId });
+						this.logger.info('[ProxyManager] Data from service transformed', { requestId });
 					} catch (error) {
-						console.error(
-							'Error transforming data from service',
-							new ContextualError('Transform error', { cause: error, context: { requestId } }),
-						);
+						this.logger.error('[ProxyManager] Error transforming data from service', {
+							error: new ContextualError('Transform error', { cause: error, context: { requestId } }),
+						});
 					}
 				}
 
 				clientSocket.write(dataToForward);
-				console.log('Data sent to client for service', { requestId });
+				this.logger.info('[ProxyManager] Data sent to client for service', { requestId });
 			});
 
 			// Handle sockets close
 			clientSocket.on('close', () => {
-				console.log('Client connection closed', { requestId });
+				this.logger.info('[ProxyManager] Client connection closed', { requestId });
 				this.serviceConnectionPool.releaseConnection(connectionId);
 			});
 
 			serviceSocket.on('close', () => {
-				console.log('Service connection for client closed', { requestId });
+				this.logger.info('[ProxyManager] Service connection for client closed', { requestId });
 				clientSocket.end();
 				this.serviceConnectionPool.closeConnection(connectionId);
 			});
 
 			// Handle sockets errors
 			clientSocket.on('error', (err) => {
-				console.error('Client socket error', new ContextualError('Client socket error', { cause: err, context: { requestId } }));
+				this.logger.error('[ProxyManager] Client socket error', {
+					error: new ContextualError('Client socket error', { cause: err, context: { requestId } }),
+				});
 				this.serviceConnectionPool.releaseConnection(connectionId);
 			});
 
 			serviceSocket.on('error', (err) => {
-				console.error('Service socket error', new ContextualError('Service socket error', { cause: err, context: { requestId } }));
+				this.logger.error('[ProxyManager] Service socket error', {
+					error: new ContextualError('Service socket error', { cause: err, context: { requestId } }),
+				});
 				clientSocket.end();
 				this.serviceConnectionPool.closeConnection(connectionId);
 			});
 		} catch (error) {
-			console.error(
-				'Failed to establish connection',
-				new ContextualError('Connection setup error', { cause: error, context: { requestId } }),
-			);
+			this.logger.error('[ProxyManager] Failed to establish connection', {
+				error: new ContextualError('Connection setup error', { cause: error, context: { requestId } }),
+			});
 			clientSocket.end();
 		}
 	}
@@ -216,7 +220,7 @@ export class ProxyManager extends EventEmitter {
 
 		proxy?.close((error) => {
 			if (error) {
-				console.error('An error occured while stopping the server', { port, error });
+				this.logger.error('[ProxyManager] An error occured while stopping the server', { port, error });
 			}
 		});
 	}

@@ -69,7 +69,6 @@ function getPortMapping(): Record<number, string> {
 	}
 
 	if (Object.keys(portMapping).length === 0) {
-		console.log('No valid port mapping found. Using default port with default mapping');
 		const defaultListeningPort = parseInt(process.env.DEFAULT_LISTENING_PORT ?? '7000', 10);
 		const defaultPortMapping = process.env.DEFAULT_PORT_MAPPING
 			? process.env.DEFAULT_PORT_MAPPING.endsWith(':')
@@ -78,8 +77,6 @@ function getPortMapping(): Record<number, string> {
 			: 'default:';
 		portMapping[defaultListeningPort] = defaultPortMapping;
 	}
-
-	console.log('Port mapping configured', { portPrefixMap: portMapping });
 
 	return portMapping;
 }
