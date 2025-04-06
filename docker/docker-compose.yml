@@ -60,23 +60,26 @@ services:
         image: rediscommander/redis-commander:latest
         container_name: redis-commander
         hostname: redis-commander
+        ports:
+            - 9011:8081
         environment:
             REDIS_HOSTS: redis
             HTTP_USER: root
             HTTP_PASSWORD: qwerty
-        ports:
-            - 9011:8081
         depends_on:
             - redis
 
-    seq:
-        image: datalust/seq:latest
-        container_name: seq
-        restart: unless-stopped
-        environment:
-            - ACCEPT_EULA=Y
+    proxima-resp:
+        build:
+            context: ..
+            dockerfile: ./packages/resp/Dockerfile
+        container_name: proxima-resp
+        hostname: proxima-resp
         ports:
-            - '81:80'
-            - '5341:5341'
-        volumes:
-            - seq-data:/data
+            - 9101:9101
+            - '7000-7010:7000-7010'
+        environment:
+            FORWARD_SERVICE_HOST: redis
+            IP_WHITELIST: '*.*.*.*'
+        depends_on:
+            - redis

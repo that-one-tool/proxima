@@ -1,8 +1,0 @@
-[x] Connection pool
-[x] Connection on forward service
-[x] TLS Server used by ProxyManager
-[x] TLS Client (connect) in ConnectionPool
-[x] Healthcheck and Metrics minimal http server
-[x] ProxyManager extends EventEmitter
-[x] Cleaner logging
-[ ] Finalize docker image

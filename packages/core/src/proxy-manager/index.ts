@@ -116,7 +116,7 @@ export class ProxyManager extends EventEmitter {
 		const requestId = randomUUID();
 		const clientIp = clientSocket.remoteAddress?.replace('::ffff:', '');
 
-		this.logger.info('[ProxyManager] Client connection opened', { clientIp, port, mapping, requestId });
+		this.logger.debug('[ProxyManager] Client connection opened', { clientIp, port, mapping, requestId });
 
 		if (!this.isClientAllowedToConnect(config, clientIp)) {
 			this.logger.warn('[ProxyManager] Client is not allowed to connect. Closing connection...', { requestId });
@@ -125,7 +125,7 @@ export class ProxyManager extends EventEmitter {
 			return;
 		}
 
-		this.logger.info('[ProxyManager] Client connected', { requestId });
+		this.logger.debug('[ProxyManager] Client connected', { requestId });
 
 		try {
 			const serviceConnexion = await this.serviceConnectionPool.getConnection();
@@ -139,17 +139,17 @@ export class ProxyManager extends EventEmitter {
 			const connectionId = serviceConnexion.id;
 			const serviceSocket = serviceConnexion.socket;
 
-			this.logger.info('[ProxyManager] Using pooled connection to service for client', { requestId, connectionId });
+			this.logger.debug('[ProxyManager] Using pooled connection to service for client', { requestId, connectionId });
 
 			// Handle sockets data
 			clientSocket.on('data', (data: Buffer) => {
-				this.logger.info('[ProxyManager] Received original data from client for service', { requestId });
+				this.logger.debug('[ProxyManager] Received original data from client for service', { requestId });
 				let dataToForward = data;
 
 				if (this.fromClientTransformer) {
 					try {
 						dataToForward = this.fromClientTransformer(data, mapping);
-						this.logger.info('[ProxyManager] Data from client transformed', { requestId });
+						this.logger.debug('[ProxyManager] Data from client transformed', { requestId });
 					} catch (error) {
 						this.logger.error('[ProxyManager] Error transforming data from client', {
 							error: new ContextualError('Transform error', { cause: error, context: { requestId } }),
@@ -158,17 +158,17 @@ export class ProxyManager extends EventEmitter {
 				}
 
 				serviceSocket.write(dataToForward);
-				this.logger.info('[ProxyManager] Data sent to service for client', { requestId });
+				this.logger.debug('[ProxyManager] Data sent to service for client', { requestId });
 			});
 
 			serviceSocket.on('data', (data: Buffer) => {
-				this.logger.info('[ProxyManager] Received data from service for client', { requestId });
+				this.logger.debug('[ProxyManager] Received data from service for client', { requestId });
 				let dataToForward = data;
 
 				if (this.toClientTransformer) {
 					try {
 						dataToForward = this.toClientTransformer(data, mapping);
-						this.logger.info('[ProxyManager] Data from service transformed', { requestId });
+						this.logger.debug('[ProxyManager] Data from service transformed', { requestId });
 					} catch (error) {
 						this.logger.error('[ProxyManager] Error transforming data from service', {
 							error: new ContextualError('Transform error', { cause: error, context: { requestId } }),
@@ -177,17 +177,17 @@ export class ProxyManager extends EventEmitter {
 				}
 
 				clientSocket.write(dataToForward);
-				this.logger.info('[ProxyManager] Data sent to client for service', { requestId });
+				this.logger.debug('[ProxyManager] Data sent to client for service', { requestId });
 			});
 
 			// Handle sockets close
 			clientSocket.on('close', () => {
-				this.logger.info('[ProxyManager] Client connection closed', { requestId });
+				this.logger.debug('[ProxyManager] Client connection closed', { requestId });
 				this.serviceConnectionPool.releaseConnection(connectionId);
 			});
 
 			serviceSocket.on('close', () => {
-				this.logger.info('[ProxyManager] Service connection for client closed', { requestId });
+				this.logger.debug('[ProxyManager] Service connection for client closed', { requestId });
 				clientSocket.end();
 				this.serviceConnectionPool.closeConnection(connectionId);
 			});
