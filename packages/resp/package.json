@@ -11,7 +11,7 @@
 		"start": "node index.js",
 		"start:dev": "npm run build && node --env-file=.env dist/index.js",
 		"lint": "eslint . --max-warnings 0",
-		"test": "echo \"Error: no test specified\" && exit 1"
+		"test": "jest"
 	},
 	"author": "Jason Mejane",
 	"license": "MIT",
@@ -42,8 +42,8 @@
 			"json",
 			"ts"
 		],
-		"rootDir": "src",
-		"testRegex": ".*\\.spec\\.ts$",
+		"rootDir": ".",
+		"testRegex": ".*\\.spec.ts$",
 		"transform": {
 			"^.+\\.(t|j)s$": [
 				"ts-jest",

@@ -1,4 +1,4 @@
-import { KEY_COMMANDS, RESP_TYPES } from './resp-constants';
+import { KEY_COMMANDS, RESP_TYPES, KEY_POSITIONS } from './resp-constants';
 
 export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 	const dataStr = data.toString();
@@ -12,44 +12,88 @@ export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 	const lines = dataStr.split('\r\n');
 	const newLines: string[] = [];
 
-	let i = 0;
-	while (i < lines.length) {
-		if (i === 0 || !lines[i].startsWith('$')) {
-			// Array header line (e.g., *3) OR any other part of the RESP protocol, copy as is
-			newLines.push(lines[i]);
-			i++;
-			continue;
-		}
+	// First line is the array header (*n), push it as is
+	newLines.push(lines[0]);
 
-		// String length marker
-		const command = lines[i + 1];
+	// Get command name to determine key positions
+	let cmdLower = '';
+	let argsStartIndex = 0;
+
+	// Process command name (usually second item after array header)
+	for (let i = 1; i < lines.length; i++) {
 		newLines.push(lines[i]);
-		newLines.push(command);
-		i += 2;
 
-		// Process the arguments (key is usually the first argument)
-		// Check if this is a command that needs key prefixing
-		const cmdLower = command.toLowerCase();
-		const needsPrefixing = KEY_COMMANDS.includes(cmdLower);
-		const shouldPrefix = needsPrefixing && i < lines.length && lines[i].startsWith('$');
+		if (lines[i].startsWith('$')) {
+			// Next line is the string content
+			if (i + 1 < lines.length) {
+				const value = lines[i + 1];
+				newLines.push(value);
 
-		if (!shouldPrefix) {
+				// If this is the first string (command name)
+				if (cmdLower === '') {
+					cmdLower = value.toLowerCase();
+					argsStartIndex = i + 2; // Arguments start after command name
+					break;
+				}
+			}
+
+			i++; // Skip string content in next iteration
+		}
+	}
+
+	// If not a key command or not found in KEY_POSITIONS, pass through the rest unchanged
+	if (!KEY_COMMANDS.includes(cmdLower) || !(cmdLower in KEY_POSITIONS)) {
+		for (let i = argsStartIndex; i < lines.length; i++) {
+			if (i < lines.length) {
+				newLines.push(lines[i]);
+			}
+		}
+
+		return Buffer.from(newLines.join('\r\n'));
+	}
+
+	// Determine which arguments are keys
+	const keyPattern = KEY_POSITIONS[cmdLower];
+
+	// Process arguments
+	let argIndex = 0;
+	for (let i = argsStartIndex; i < lines.length; i++) {
+		if (!lines[i].startsWith('$')) {
+			newLines.push(lines[i]);
 			continue;
 		}
 
-		// This is the key
-		let key = lines[i + 1];
+		// This is a string length marker
+		const lengthLine = lines[i];
 
-		// Add prefix if not already prefixed
-		if (!key.startsWith(keyPrefix)) {
-			key = keyPrefix + key;
+		if (i + 1 >= lines.length) {
+			newLines.push(lengthLine);
+			continue;
 		}
 
-		// Update the length marker for the prefixed key
-		const newKeyLength = Buffer.byteLength(key);
-		newLines.push(`$${newKeyLength}`);
-		newLines.push(key);
-		i += 2;
+		// Next line is the string content
+		const value = lines[i + 1];
+
+		// Check if this argument is a key that needs prefixing
+		let isKey =
+			keyPattern === 'all' ||
+			(keyPattern === 'even' && argIndex % 2 === 0) ||
+			(keyPattern === 'odd' && argIndex % 2 === 1) ||
+			(Array.isArray(keyPattern) && keyPattern.includes(argIndex));
+
+		if (isKey && !value.startsWith(keyPrefix)) {
+			const prefixedKey = keyPrefix + value;
+			const newKeyLength = Buffer.byteLength(prefixedKey);
+
+			newLines.push(`$${newKeyLength}`);
+			newLines.push(prefixedKey);
+		} else {
+			newLines.push(lengthLine);
+			newLines.push(value);
+		}
+
+		argIndex++;
+		i++; // Skip string content in next iteration
 	}
 
 	return Buffer.from(newLines.join('\r\n'));

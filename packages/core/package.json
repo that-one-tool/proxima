@@ -9,8 +9,7 @@
 		"check-types": "tsc --noEmit",
 		"clear:build": "rm -rf dist && rm -rf .cache",
 		"clear:turbo": "rm -rf .turbo",
-		"lint": "eslint . --max-warnings 0",
-		"test": "echo \"Error: no test specified\" && exit 1"
+		"lint": "eslint . --max-warnings 0"
 	},
 	"author": "Jason Mejane",
 	"license": "MIT",
@@ -41,8 +40,6 @@
 			"json",
 			"ts"
 		],
-		"rootDir": "src",
-		"testRegex": ".*\\.spec\\.ts$",
 		"transform": {
 			"^.+\\.(t|j)s$": [
 				"ts-jest",

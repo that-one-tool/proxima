@@ -15,7 +15,8 @@
 		"lint:fix": "turbo lint -- --fix",
 		"start:all": "docker compose -f docker/docker-compose.yml up -d",
 		"start:dev": "turbo start:dev",
-		"stop:all": "docker compose -f docker/docker-compose.yml down"
+		"stop:all": "docker compose -f docker/docker-compose.yml down",
+		"test": "turbo test"
 	},
 	"packageManager": "npm@10.9.2",
 	"engines": {
