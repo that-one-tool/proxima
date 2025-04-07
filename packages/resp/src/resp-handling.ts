@@ -1,29 +1,28 @@
-import { KEY_COMMANDS, RESP_TYPES, KEY_POSITIONS } from './resp-constants';
+import { KEY_COMMANDS, KEY_POSITIONS, RESP, RESP_SPLIT, RESP_U8_LIST, RESP_U8 } from './resp-constants';
 
+/**
+ * Prefixes keys in Redis commands with a specified prefix
+ *
+ * @param {Buffer} data The command data buffer from Redis client
+ * @param {string} keyPrefix The prefix to add to keys
+ * @returns {Buffer} The modified command buffer with prefixed keys
+ */
 export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
-	const dataStr = data.toString();
-
-	if (!dataStr.startsWith('*')) {
-		// For any other RESP type or non-RESP format, pass through unchanged
+	if (!data || !keyPrefix || data[0] !== RESP_U8.ARRAY) {
 		return data;
 	}
 
-	// Only handle RESP protocol array commands starting with '*'
-	const lines = dataStr.split('\r\n');
-	const newLines: string[] = [];
+	const dataStr = data.toString();
+	const lines = dataStr.split(RESP_SPLIT);
+	const newLines: string[] = [lines[0]];
 
-	// First line is the array header (*n), push it as is
-	newLines.push(lines[0]);
-
-	// Get command name to determine key positions
 	let cmdLower = '';
 	let argsStartIndex = 0;
 
-	// Process command name (usually second item after array header)
 	for (let i = 1; i < lines.length; i++) {
 		newLines.push(lines[i]);
 
-		if (lines[i].startsWith('$')) {
+		if (lines[i].startsWith(RESP.BULK)) {
 			// Next line is the string content
 			if (i + 1 < lines.length) {
 				const value = lines[i + 1];
@@ -49,7 +48,7 @@ export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 			}
 		}
 
-		return Buffer.from(newLines.join('\r\n'));
+		return Buffer.from(newLines.join(RESP_SPLIT));
 	}
 
 	// Determine which arguments are keys
@@ -58,12 +57,11 @@ export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 	// Process arguments
 	let argIndex = 0;
 	for (let i = argsStartIndex; i < lines.length; i++) {
-		if (!lines[i].startsWith('$')) {
+		if (!lines[i].startsWith(RESP.BULK)) {
 			newLines.push(lines[i]);
 			continue;
 		}
 
-		// This is a string length marker
 		const lengthLine = lines[i];
 
 		if (i + 1 >= lines.length) {
@@ -74,7 +72,6 @@ export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 		// Next line is the string content
 		const value = lines[i + 1];
 
-		// Check if this argument is a key that needs prefixing
 		let isKey =
 			keyPattern === 'all' ||
 			(keyPattern === 'even' && argIndex % 2 === 0) ||
@@ -85,7 +82,7 @@ export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 			const prefixedKey = keyPrefix + value;
 			const newKeyLength = Buffer.byteLength(prefixedKey);
 
-			newLines.push(`$${newKeyLength}`);
+			newLines.push(`${RESP.BULK}${newKeyLength}`);
 			newLines.push(prefixedKey);
 		} else {
 			newLines.push(lengthLine);
@@ -96,55 +93,46 @@ export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 		i++; // Skip string content in next iteration
 	}
 
-	return Buffer.from(newLines.join('\r\n'));
+	return Buffer.from(newLines.join(RESP_SPLIT));
 }
 
 /**
  * Removes prefixes from keys in Redis responses
  *
- * @param data The response data from Redis server
- * @param keyPrefix The prefix to remove from keys
- * @returns Modified response with prefixes removed
+ * @param {Buffer} data The response data buffer from Redis server
+ * @param {string} keyPrefix The prefix to remove from keys
+ * @returns {Buffer} The modified response buffer with prefixes removed
  */
 export function removePrefixFromRedisResponse(data: Buffer, keyPrefix: string): Buffer {
-	const dataStr = data.toString();
-	const firstChar = dataStr.charAt(0);
-	const isBulkString = dataStr.startsWith('$');
-	const isArray = dataStr.startsWith('*');
+	const firstChar = data[0];
+	const isBulkString = firstChar === RESP_U8.BULK;
+	const isArray = firstChar === RESP_U8.ARRAY;
 
-	if (!RESP_TYPES.includes(firstChar) || (!isBulkString && !isArray)) {
-		// Not a RESP protocol response, return as is
-		// OR simple string, error, or integer responses - pass through as they don't contain keys
+	if (!RESP_U8_LIST.includes(firstChar) || (!isBulkString && !isArray)) {
 		return data;
 	}
 
+	const dataStr = data.toString();
+
 	if (isBulkString) {
-		// Bulk string response - might be a key value
 		return processBulkStringResponse(dataStr, keyPrefix);
 	}
 
-	// Array response (e.g., from KEYS, LRANGE, etc.)
 	return processArrayResponse(dataStr, keyPrefix);
 }
 
-/**
- * Process a bulk string response (starts with $) and remove prefix if it's a key
- */
 function processBulkStringResponse(dataStr: string, keyPrefix: string): Buffer {
-	// Check if it's a null bulk string ($-1\r\n)
 	if (dataStr.startsWith('$-1')) {
 		return Buffer.from(dataStr);
 	}
 
-	const lines = dataStr.split('\r\n');
+	const lines = dataStr.split(RESP_SPLIT);
 	if (lines.length < 2) {
 		return Buffer.from(dataStr);
 	}
 
-	// Get the value string
 	const value = lines[1];
 
-	// Not prefixed or not a key, return as is
 	if (!value.startsWith(keyPrefix)) {
 		return Buffer.from(dataStr);
 	}
@@ -152,34 +140,27 @@ function processBulkStringResponse(dataStr: string, keyPrefix: string): Buffer {
 	const unprefixedValue = value.substring(keyPrefix.length);
 	const newLength = Buffer.byteLength(unprefixedValue);
 
-	// Reconstruct the response
-	return Buffer.from(`$${newLength}\r\n${unprefixedValue}\r\n`);
+	return Buffer.from(`${RESP.BULK}${newLength}${RESP_SPLIT}${unprefixedValue}${RESP_SPLIT}`);
 }
 
-/**
- * Process an array response (starts with *) and remove prefix from each element if it's a key
- */
 function processArrayResponse(dataStr: string, keyPrefix: string): Buffer {
-	const lines = dataStr.split('\r\n');
+	const lines = dataStr.split(RESP_SPLIT);
 	const newLines: string[] = [];
 
 	let i = 0;
 	while (i < lines.length) {
-		if (i === 0 || !lines[i].startsWith('$')) {
-			// Array header (e.g., *3) OR any other part than a bulk string, copy as is
+		if (i === 0 || !lines[i].startsWith(RESP.BULK)) {
 			newLines.push(lines[i]);
 			i++;
 			continue;
 		}
 
-		// Bulk string length marker
 		const lengthLine = lines[i];
 		const value = lines[i + 1];
 
 		i += 2;
 
 		if (!value || !value.startsWith(keyPrefix)) {
-			// Keep as is if not prefixed or empty
 			newLines.push(lengthLine);
 			newLines.push(value);
 			continue;
@@ -187,9 +168,9 @@ function processArrayResponse(dataStr: string, keyPrefix: string): Buffer {
 
 		const unprefixedValue = value.substring(keyPrefix.length);
 		const newLength = Buffer.byteLength(unprefixedValue);
-		newLines.push(`$${newLength}`);
+		newLines.push(`${RESP.BULK}${newLength}`);
 		newLines.push(unprefixedValue);
 	}
 
-	return Buffer.from(newLines.join('\r\n'));
+	return Buffer.from(newLines.join(RESP_SPLIT));
 }

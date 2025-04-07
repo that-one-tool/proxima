@@ -16,7 +16,24 @@ export const KEY_COMMANDS = [
 	'mget',
 ];
 
-export const RESP_TYPES = ['+', '-', ':', '$', '*'];
+export const RESP = {
+	BULK: '$',
+	ARRAY: '*',
+	STRING: '+',
+	ERROR: '-',
+	INT: ':',
+	NULL: '|',
+};
+export const RESP_U8 = {
+	BULK: 36,
+	ARRAY: 42,
+	STRING: 43,
+	ERROR: 45,
+	INT: 58,
+	NULL: 124,
+};
+export const RESP_U8_LIST = Object.values(RESP_U8);
+export const RESP_SPLIT = '\r\n';
 
 // Maps commands to patterns of which arguments are keys
 // 0-based index or string pattern ('even', 'odd', 'all')
