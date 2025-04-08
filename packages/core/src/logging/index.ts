@@ -10,7 +10,9 @@ export class Logger {
 
 		this.logger = winston.createLogger({
 			level: options.level ?? 'info',
-			format: options.format ?? winston.format.combine(winston.format.timestamp(), winston.format.json()),
+			format:
+				options.format ??
+				winston.format.combine(winston.format.errors({ stack: true }), winston.format.timestamp(), winston.format.json()),
 			transports: Array.from(transports),
 			silent: options.silent ?? false,
 		});

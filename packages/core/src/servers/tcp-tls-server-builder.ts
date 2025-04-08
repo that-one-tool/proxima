@@ -2,7 +2,7 @@ import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { ContextualError } from '../errors';
 import { TlsServerClientOptions } from '../types';
-import { makeTlsOptions, validateOptions } from '../utils/tls';
+import { makeTlsOptions, validateTlsOptions } from '../utils/tls';
 
 /**
  * Server class that encapsulates either a TCP or TLS server based on options
@@ -16,7 +16,7 @@ export class ServerBuilder {
 	 * @param options Server options
 	 */
 	constructor(options: TlsServerClientOptions) {
-		validateOptions(options);
+		validateTlsOptions(options);
 		this.options = options;
 	}
 

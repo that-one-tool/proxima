@@ -5,7 +5,7 @@ import * as tls from 'node:tls';
 import { ConnectionPoolError } from '../errors';
 import { Logger } from '../logging';
 import { TlsServerClientOptions } from '../types';
-import { makeTlsOptions, validateOptions } from '../utils/tls';
+import { makeTlsOptions, validateTlsOptions } from '../utils/tls';
 import { ConnectionStatus, ForwardServiceOptions, PoolConnection, PoolStats } from './types';
 
 export class ConnectionPool extends EventEmitter {
@@ -31,7 +31,8 @@ export class ConnectionPool extends EventEmitter {
 			throw new ConnectionPoolError('Port is required');
 		}
 
-		validateOptions(tlsClientOptions);
+		validateTlsOptions(tlsClientOptions);
+		this.tlsClientOptions = tlsClientOptions;
 
 		this.options = {
 			host: options.host,
@@ -45,7 +46,6 @@ export class ConnectionPool extends EventEmitter {
 			maxRetries: options.maxRetries ?? 3,
 		};
 
-		this.tlsClientOptions = tlsClientOptions;
 		this.logger = Logger.getInstance();
 
 		this.logger.info(
@@ -55,7 +55,18 @@ export class ConnectionPool extends EventEmitter {
 	}
 
 	/**
+	 * Close a specific connection
+	 *
+	 * @param {string} connectionId The id of the connection to close
+	 */
+	closeConnection(connectionId: string): void {
+		this.removeConnection(connectionId);
+	}
+
+	/**
 	 * Get an available connection or create a new one if needed
+	 *
+	 * @returns {Promise<PoolConnection | null>} A promise resolving to a connection or null
 	 */
 	async getConnection(): Promise<PoolConnection | null> {
 		for (const connection of this.connections.values()) {
@@ -97,34 +108,9 @@ export class ConnectionPool extends EventEmitter {
 	}
 
 	/**
-	 * Release a connection back to the pool
-	 */
-	releaseConnection(connectionId: string): void {
-		const connection = this.connections.get(connectionId);
-		if (!connection) return;
-
-		connection.status = ConnectionStatus.IDLE;
-		connection.lastUsed = Date.now();
-
-		// Check if there are waiting requests
-		if (this.waitingQueue.length > 0) {
-			const callback = this.waitingQueue.shift();
-			if (callback) {
-				connection.status = ConnectionStatus.BUSY;
-				callback(connection);
-			}
-		}
-	}
-
-	/**
-	 * Close a specific connection
-	 */
-	closeConnection(connectionId: string): void {
-		this.removeConnection(connectionId);
-	}
-
-	/**
 	 * Get current pool statistics
+	 *
+	 * @returns {PoolStats} The connection pool stats
 	 */
 	getStats(): PoolStats {
 		let idle = 0;
@@ -146,6 +132,28 @@ export class ConnectionPool extends EventEmitter {
 			maxConnections: this.options.maxPoolConnections,
 			minConnections: this.options.minPoolConnections,
 		};
+	}
+
+	/**
+	 * Release a connection back to the pool
+	 *
+	 * @param {string} connectionId The id of the connection to release
+	 */
+	releaseConnection(connectionId: string): void {
+		const connection = this.connections.get(connectionId);
+		if (!connection) return;
+
+		connection.status = ConnectionStatus.IDLE;
+		connection.lastUsed = Date.now();
+
+		// Check if there are waiting requests
+		if (this.waitingQueue.length > 0) {
+			const callback = this.waitingQueue.shift();
+			if (callback) {
+				connection.status = ConnectionStatus.BUSY;
+				callback(connection);
+			}
+		}
 	}
 
 	/**

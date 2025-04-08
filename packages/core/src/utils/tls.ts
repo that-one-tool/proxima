@@ -31,7 +31,7 @@ export function makeTlsOptions(options: TlsOptions): tls.ConnectionOptions {
 	}
 }
 
-export function validateOptions(options: TlsServerClientOptions): void {
+export function validateTlsOptions(options: TlsServerClientOptions): void {
 	if (options.useTls) {
 		const hasCertPath = options.tlsOptions?.certPath;
 		const hasKeyPath = options.tlsOptions?.keyPath;
