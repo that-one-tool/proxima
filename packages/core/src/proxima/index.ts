@@ -5,11 +5,14 @@ import { ProxyManager } from '../proxy-manager';
 import { HttpServer } from '../servers/http-server';
 import { TransformerFunction } from '../types';
 
+const SHUTDOWN_TIMEOUT_MS = 10000;
+
 export class Proxima {
 	private config: Config;
 	private proxyManager: ProxyManager;
 	private httpServer: HttpServer;
 	private logger: Logger;
+	private isShuttingDown = false;
 
 	constructor(options?: LoggerOptions) {
 		this.logger = Logger.getInstance(options);
@@ -32,46 +35,69 @@ export class Proxima {
 	start(): Proxima {
 		try {
 			this.logger.info('[Proxima] Starting Proxima servers...');
-
-			this.proxyManager.on('ready', () => {
-				this.logger.info(
-					`[Proxima] Forwarding to ${this.config.forwardServiceOptions.name} ` +
-						`at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
-				);
-			});
-
-			this.proxyManager.on('closed', () => {
-				this.logger.info('[Proxima] No reverse proxies left. Exiting...');
-				this.httpServer.on('closed', () => {
-					process.exit(0);
-				});
-				this.httpServer.stop();
-			});
-
-			this.proxyManager.on('failure', () => {
-				this.logger.info('[Proxima] Service connection pool critical failure. Exiting...');
-				this.handleShutdown(1);
-			});
+			this.registerLifecycleHandlers();
 
 			this.httpServer.start();
 			this.proxyManager.startServers();
 		} catch (error) {
 			this.logger.error('[Proxima] An unexpected exception occured', { error });
-			this.handleShutdown(1);
+			void this.shutdownAndExit(1);
 		}
 
 		return this;
 	}
 
 	async stop(): Promise<void> {
-		await this.handleShutdown(0);
+		await this.shutdownAndExit(0);
 	}
 
-	private async handleShutdown(exitCode: number): Promise<void> {
-		await this.proxyManager.stopServers();
-		this.httpServer.on('closed', () => {
-			process.exit(exitCode);
+	private registerLifecycleHandlers(): void {
+		this.proxyManager.on('ready', () => {
+			this.logger.info(
+				`[Proxima] Forwarding to ${this.config.forwardServiceOptions.name} ` +
+					`at ${this.config.forwardServiceOptions.host}:${this.config.forwardServiceOptions.port}`,
+			);
 		});
-		this.httpServer.stop();
+
+		this.proxyManager.on('closed', () => {
+			this.logger.info('[Proxima] No reverse proxies left. Exiting...');
+			void this.shutdownAndExit(0);
+		});
+
+		this.proxyManager.on('failure', () => {
+			this.logger.info('[Proxima] Service connection pool critical failure. Exiting...');
+			void this.shutdownAndExit(1);
+		});
+
+		this.httpServer.on('error', (error) => {
+			this.logger.error('[Proxima] HTTP server error', { error });
+			void this.shutdownAndExit(1);
+		});
+	}
+
+	private async shutdownAndExit(exitCode: number): Promise<void> {
+		if (this.isShuttingDown) {
+			return;
+		}
+		this.isShuttingDown = true;
+
+		await Promise.race([this.stopServers(), this.shutdownTimeout()]);
+		process.exit(exitCode);
+	}
+
+	private async stopServers(): Promise<void> {
+		await this.proxyManager.stopServers();
+		await this.httpServer.stop().catch((error) => {
+			this.logger.error('[Proxima] Error stopping HTTP server', { error });
+		});
+	}
+
+	private shutdownTimeout(): Promise<void> {
+		return new Promise<void>((resolve) => {
+			setTimeout(() => {
+				this.logger.error('[Proxima] Shutdown timed out, forcing exit');
+				resolve();
+			}, SHUTDOWN_TIMEOUT_MS).unref();
+		});
 	}
 }

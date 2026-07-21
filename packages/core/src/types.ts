@@ -1,10 +1,7 @@
 export type Optional<T> = T | undefined;
 export type TransformerFunction = Optional<(data: Buffer, mapping: string) => Buffer>;
 
-export interface TlsServerClientOptions {
-	useTls?: boolean;
-	tlsOptions?: TlsOptions;
-}
+export type TlsServerClientOptions = { useTls?: false; tlsOptions?: TlsOptions } | { useTls: true; tlsOptions: TlsOptions };
 
 export interface TlsOptions {
 	certPath: string;

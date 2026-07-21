@@ -6,28 +6,32 @@ export class Logger {
 	private logger: winston.Logger;
 
 	private constructor(options: LoggerOptions = {}) {
-		const transports = new Set(options.transports ?? [new winston.transports.Console()]);
+		this.logger = winston.createLogger(Logger.buildWinstonOptions(options));
+	}
 
-		this.logger = winston.createLogger({
+	private static buildWinstonOptions(options: LoggerOptions): winston.LoggerOptions {
+		return {
 			level: options.level ?? 'info',
 			format:
 				options.format ??
 				winston.format.combine(winston.format.errors({ stack: true }), winston.format.timestamp(), winston.format.json()),
-			transports: Array.from(transports),
+			transports: options.transports ?? [new winston.transports.Console()],
 			silent: options.silent ?? false,
-		});
+		};
 	}
 
 	public static getInstance(options?: LoggerOptions): Logger {
 		if (!Logger.instance) {
 			Logger.instance = new Logger(options);
+		} else if (options) {
+			Logger.instance.logger.warn('Logger already initialized; ignoring options. Use reconfigure() to change the configuration.');
 		}
 		return Logger.instance;
 	}
 
 	public static reconfigure(options: LoggerOptions): void {
 		if (Logger.instance) {
-			Logger.instance = new Logger(options);
+			Logger.instance.logger.configure(Logger.buildWinstonOptions(options));
 		}
 	}
 

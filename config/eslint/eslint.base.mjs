@@ -1,5 +1,5 @@
 import eslint from '@eslint/js';
-import eslintConfigPrettier from 'eslint-prettier';
+import eslintConfigPrettier from 'eslint-config-prettier';
 import turboPlugin from 'eslint-plugin-turbo';
 import tseslint from 'typescript-eslint';
 
@@ -26,6 +26,19 @@ export const config = [
 		},
 		rules: {
 			'turbo/no-undeclared-env-vars': 'error',
+		},
+	},
+	{
+		// Test mocks legitimately use `any` and dynamic shapes; relax type-safety rules for specs.
+		files: ['**/test/**/*.ts', '**/*.spec.ts'],
+		rules: {
+			'@typescript-eslint/no-explicit-any': 'off',
+			'@typescript-eslint/no-unsafe-assignment': 'off',
+			'@typescript-eslint/no-unsafe-member-access': 'off',
+			'@typescript-eslint/no-unsafe-call': 'off',
+			'@typescript-eslint/no-unsafe-argument': 'off',
+			'@typescript-eslint/no-unsafe-return': 'off',
+			'@typescript-eslint/no-require-imports': 'off',
 		},
 	},
 	{

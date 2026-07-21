@@ -1,3 +1,7 @@
 export { Proxima } from './proxima';
-export * from './types';
-export * from './logging/types';
+export { HttpServer } from './servers/http-server';
+export { ServerBuilder } from './servers/tcp-tls-server-builder';
+export { makeTlsOptions, validateTlsOptions } from './utils/tls';
+export { ConnectionPoolError, ContextualError, WrappedError } from './errors';
+export type * from './types';
+export type * from './logging/types';

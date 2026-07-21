@@ -125,13 +125,21 @@ This proxy allows multiple applications or tenants to safely share a single Redi
 
 ## Supported Redis Commands
 
-The proxy automatically prefixes keys for the following Redis commands:
+The proxy automatically prefixes keys for ~120 key-bearing commands, grouped by how their key arguments are positioned:
 
-- GET, SET
-- HGET, HSET
-- DEL, EXISTS
-- INCR, DECR
-- LPUSH, RPUSH, LRANGE
-- EXPIRE, TTL
+- **Single key at argument 0** — strings (`GET`, `GETSET`, `GETDEL`, `GETEX`, `SET`, `SETNX`, `SETEX`, `PSETEX`, `APPEND`, `STRLEN`, `GETRANGE`, `SETRANGE`, `INCR`/`DECR` family, `SETBIT`, `GETBIT`, `BITCOUNT`, `BITPOS`, `BITFIELD`), key/TTL generics (`EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`/`EXPIRETIME`/`PEXPIRETIME`, `TTL`/`PTTL`, `PERSIST`, `TYPE`, `DUMP`), hashes (`HGET`, `HSET`, `HSETNX`, `HMSET`, `HMGET`, `HDEL`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HINCRBY`/`HINCRBYFLOAT`, `HSTRLEN`, `HSCAN`, `HRANDFIELD`), lists (`LPUSH`/`RPUSH`/`LPUSHX`/`RPUSHX`, `LPOP`/`RPOP`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LREM`, `LTRIM`, `LPOS`), sets (`SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER`, `SSCAN`), sorted sets (`ZADD`, `ZREM`, `ZSCORE`/`ZMSCORE`, `ZRANGE` family, `ZRANK`/`ZREVRANK`, `ZCARD`, `ZCOUNT`, `ZLEXCOUNT`, `ZINCRBY`, `ZSCAN`, `ZPOPMIN`/`ZPOPMAX`), streams (`XADD`, `XLEN`, `XRANGE`/`XREVRANGE`, `XDEL`, `XTRIM`), geo (`GEOADD`, `GEOPOS`, `GEODIST`, `GEOHASH`, `GEOSEARCH`) and `PFADD`.
+- **Two keys at arguments 0 and 1** — `RENAME`, `RENAMENX`, `COPY`, `SMOVE`, `LMOVE`, `BLMOVE`, `RPOPLPUSH`, `BRPOPLPUSH`, `LCS`.
+- **Every argument is a key** — `DEL`, `UNLINK`, `TOUCH`, `EXISTS`, `WATCH`, `MGET`, `SINTER`, `SUNION`, `SDIFF`, `PFCOUNT`, `PFMERGE`.
+- **Keys at even positions (key/value pairs)** — `MSET`, `MSETNX`.
 
-Additional commands can be added by modifying the `KEY_COMMANDS` array in the source code.
+The fixed-position mapping lives in the `KEY_POSITIONS` map in `src/resp-constants.ts`; `KEY_COMMANDS` is derived from it. Add fixed-position commands by adding an entry to `KEY_POSITIONS`.
+
+Commands whose key positions depend on a variadic count, a subcommand, or an options structure are resolved at parse time by `KEY_RESOLVERS` (also in `src/resp-constants.ts`):
+
+- **All args from an offset are keys** — `BITOP` (destination + every source).
+- **Keys up to a trailing timeout** — the blocking `BLPOP`, `BRPOP`, `BZPOPMIN`, `BZPOPMAX`.
+- **A `numkeys` count precedes the keys** — `ZUNION`/`ZINTER`/`ZDIFF`, `SINTERCARD`, `LMPOP`/`ZMPOP`/`BLMPOP`/`BZMPOP`, and the `*STORE` variants (`ZUNIONSTORE`, `ZINTERSTORE`, `ZDIFFSTORE`) whose destination sits before the count.
+- **A key only for certain subcommands** — `OBJECT` (`ENCODING`/`REFCOUNT`/`IDLETIME`/`FREQ`) and `MEMORY` (`USAGE`).
+- **`SORT`/`SORT_RO`** — the source key plus every `BY`, `GET`, and `STORE` pattern; the `GET #` self-reference is left untouched.
+
+**Not yet covered:** Lua-script and function key arguments (`EVAL`/`EVALSHA`/`FCALL` `numkeys`) are out of scope — scripts must namespace their own keys.

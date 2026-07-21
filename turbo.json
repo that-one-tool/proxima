@@ -25,7 +25,9 @@
 			"dependsOn": ["^clear:turbo"]
 		},
 		"start:dev": {
-			"dependsOn": ["^start:dev"]
+			"dependsOn": ["^start:dev"],
+			"cache": false,
+			"persistent": true
 		},
 		"test": {
 			"dependsOn": ["^test"]

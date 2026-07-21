@@ -5,7 +5,7 @@
 		"build": "turbo build",
 		"build:force": "turbo build --force",
 		"check": "turbo build lint test",
-		"check:fix": "turbo build format lint:fix test",
+		"check:fix": "npm run build && npm run format && npm run lint:fix && npm run test",
 		"check:force": "turbo build lint test --force",
 		"clear:all": "npm run clear:build && npm run clear:turbo",
 		"clear:build": "turbo clear:build --force",
