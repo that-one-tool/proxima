@@ -1,0 +1,15 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+.env
+.env.*
+**/dist
+**/coverage
+**/.turbo
+.turbo
+out
+**/.cache
+*.log
+npm-debug.log*
+.DS_Store

@@ -51,6 +51,8 @@ services:
         image: redis:7.4.1-alpine3.20
         container_name: redis
         hostname: redis
+        # DEV ONLY: no auth and 6379 published to the host for local tooling.
+        # Do not reuse this service definition outside local development.
         ports:
             - '6379:6379'
         volumes:
@@ -64,8 +66,8 @@ services:
             - 9011:8081
         environment:
             REDIS_HOSTS: redis
-            HTTP_USER: root
-            HTTP_PASSWORD: qwerty
+            HTTP_USER: ${REDIS_COMMANDER_USER:-root}
+            HTTP_PASSWORD: ${REDIS_COMMANDER_PASSWORD:-qwerty}
         depends_on:
             - redis
 
@@ -80,6 +82,7 @@ services:
             - '7000-7010:7000-7010'
         environment:
             FORWARD_SERVICE_HOST: redis
-            IP_WHITELIST: '*.*.*.*'
+            # DEV ONLY: '*.*.*.*' is allow-all. Override IP_WHITELIST for any non-local use.
+            IP_WHITELIST: ${IP_WHITELIST:-*.*.*.*}
         depends_on:
             - redis

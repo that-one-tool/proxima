@@ -5,11 +5,12 @@
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"scripts": {
-		"build": "rm -rf dist && tsc --build tsconfig.build.json",
+		"build": "rm -rf dist .cache && tsc --build tsconfig.build.json",
 		"check-types": "tsc --noEmit",
 		"clear:build": "rm -rf dist && rm -rf .cache",
 		"clear:turbo": "rm -rf .turbo",
-		"lint": "eslint . --max-warnings 0"
+		"lint": "eslint . --max-warnings 0",
+		"test": "jest"
 	},
 	"author": "Jason Mejane",
 	"license": "MIT",
@@ -29,7 +30,7 @@
 		"@repo/eslint": "*",
 		"@repo/typescript": "*",
 		"@types/jest": "^30.0.0",
-		"@types/node": "^26.1.1",
+		"@types/node": "^24",
 		"jest": "^30.4.2",
 		"ts-jest": "^29.4.11",
 		"typescript": "^5.9.3"

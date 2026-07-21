@@ -13,13 +13,13 @@ export function makeTlsOptions(options: TlsOptions): tls.ConnectionOptions {
 			throw new ContextualError('Private key file not found', { context: { path: options.keyPath } });
 		}
 
+		if (options.caPath && !fs.existsSync(options.caPath)) {
+			throw new ContextualError('CA file not found', { context: { path: options.caPath } });
+		}
+
 		const cert = fs.readFileSync(options.certPath);
 		const key = fs.readFileSync(options.keyPath);
-
-		let ca: Buffer | undefined;
-		if (options.caPath && fs.existsSync(options.caPath)) {
-			ca = fs.readFileSync(options.caPath);
-		}
+		const ca = options.caPath ? fs.readFileSync(options.caPath) : undefined;
 
 		return {
 			cert,
@@ -32,12 +32,22 @@ export function makeTlsOptions(options: TlsOptions): tls.ConnectionOptions {
 }
 
 export function validateTlsOptions(options: TlsServerClientOptions): void {
-	if (options.useTls) {
-		const hasCertPath = options.tlsOptions?.certPath;
-		const hasKeyPath = options.tlsOptions?.keyPath;
+	if (!options.useTls) {
+		return;
+	}
 
-		if (!hasCertPath || !hasKeyPath) {
-			throw new ContextualError('Cert path and Key path environment variables must be set to use TLS');
-		}
+	ensureCertAndKey(options.tlsOptions);
+	ensureCaForMutualTls(options.tlsOptions);
+}
+
+function ensureCertAndKey(tlsOptions: TlsOptions | undefined): void {
+	if (!tlsOptions?.certPath || !tlsOptions?.keyPath) {
+		throw new ContextualError('Cert path and Key path environment variables must be set to use TLS');
+	}
+}
+
+function ensureCaForMutualTls(tlsOptions: TlsOptions | undefined): void {
+	if (tlsOptions?.requestCert && !tlsOptions?.caPath) {
+		throw new ContextualError('CA path must be set when requestCert is enabled for mutual TLS');
 	}
 }

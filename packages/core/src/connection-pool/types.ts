@@ -1,4 +1,5 @@
 import net from 'node:net';
+import type { LeasedConnection } from './leased-connection';
 
 export enum ConnectionStatus {
 	IDLE = 'idle',
@@ -11,6 +12,9 @@ export interface PoolConnection {
 	socket: net.Socket;
 	status: ConnectionStatus;
 	lastUsed: number;
+	leaseId: number;
+	/** The wrapper handed to the current lease holder, if any. Torn down by the pool on release. */
+	lease?: LeasedConnection;
 }
 
 export interface ForwardServiceOptions {
@@ -22,6 +26,8 @@ export interface ForwardServiceOptions {
 	idleConnectionTimeoutMs?: number;
 	connectionCleanupIntervalMs?: number;
 	acquireConnectionTimeoutMs?: number;
+	connectionTimeoutMs?: number;
+	maxWaitingQueueSize?: number;
 	maxRetries?: number;
 }
 

@@ -1,6 +1,7 @@
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { ContextualError } from '../errors';
+import { Logger } from '../logging';
 import { TlsServerClientOptions } from '../types';
 import { makeTlsOptions, validateTlsOptions } from '../utils/tls';
 
@@ -10,6 +11,7 @@ import { makeTlsOptions, validateTlsOptions } from '../utils/tls';
 export class ServerBuilder {
 	private server: net.Server | tls.Server | undefined = undefined;
 	private options: TlsServerClientOptions;
+	private logger: Logger;
 
 	/**
 	 * Create a new server instance
@@ -18,6 +20,7 @@ export class ServerBuilder {
 	constructor(options: TlsServerClientOptions) {
 		validateTlsOptions(options);
 		this.options = options;
+		this.logger = Logger.getInstance();
 	}
 
 	/**
@@ -31,11 +34,25 @@ export class ServerBuilder {
 	 * Create a server instance based on the options
 	 */
 	createServer(listener: (socket: net.Socket) => void): net.Server | tls.Server {
+		const server = this.buildServer(listener);
+		this.attachErrorListener(server);
+		this.server = server;
+
+		return server;
+	}
+
+	private buildServer(listener: (socket: net.Socket) => void): net.Server | tls.Server {
 		if (this.options.useTls) {
 			return this.createTlsServer(listener);
-		} else {
-			return this.createTcpServer(listener);
 		}
+
+		return this.createTcpServer(listener);
+	}
+
+	private attachErrorListener(server: net.Server | tls.Server): void {
+		server.on('error', (error) => {
+			this.logger.error('[ServerBuilder] Server error', { error });
+		});
 	}
 
 	/**
@@ -56,16 +73,23 @@ export class ServerBuilder {
 		try {
 			const tlsOptions = makeTlsOptions(this.options.tlsOptions);
 
-			return tls.createServer(
+			const server = tls.createServer(
 				{
 					cert: tlsOptions.cert,
 					key: tlsOptions.key,
 					ca: tlsOptions.ca,
 					requestCert: this.options.tlsOptions.requestCert,
 					rejectUnauthorized: this.options.tlsOptions.rejectUnauthorized,
+					minVersion: 'TLSv1.2',
 				},
 				listener,
 			);
+
+			server.on('tlsClientError', (error) => {
+				this.logger.error('[ServerBuilder] TLS client handshake error', { error });
+			});
+
+			return server;
 		} catch (error) {
 			throw new ContextualError('Failed to create TLS server', { cause: error });
 		}
