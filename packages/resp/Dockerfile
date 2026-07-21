@@ -1,8 +1,8 @@
-FROM node:22.14.0-alpine3.21 AS base 
+FROM node:24.18-alpine3.24 AS base 
 
 FROM base AS builder
 WORKDIR /app
-RUN npm i -g turbo
+RUN npm i -g turbo@2.10.5
 COPY . .
 RUN turbo prune @that-one-tool/proxima-resp --docker
 
