@@ -16,7 +16,8 @@
 		"start:all": "docker compose -f docker/docker-compose.yml up -d",
 		"start:dev": "turbo start:dev",
 		"stop:all": "docker compose -f docker/docker-compose.yml down",
-		"test": "turbo test"
+		"test": "turbo test",
+		"test:integration": "npm run build && npm run test:integration --workspace @that-one-tool/proxima-integration-tests"
 	},
 	"packageManager": "npm@10.9.2",
 	"engines": {
@@ -24,7 +25,8 @@
 	},
 	"workspaces": [
 		"config/*",
-		"packages/*"
+		"packages/*",
+		"test/integration"
 	],
 	"devDependencies": {
 		"prettier": "^3.9.5",
