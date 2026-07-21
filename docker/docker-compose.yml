@@ -30,7 +30,7 @@ services:
             - '4510-4559:4510-4559'
         environment:
             - DEBUG=1
-            - LOCALSTACK_AUTH_TOKEN="ls-wOVopUZi-Keka-8680-fuzI-CUwO9546b232"
+            - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
             - LOCALSTACK_HOST=localstack:4566
             - S3_SKIP_SIGNATURE_VALIDATION=1
             - SERVICES=dynamodb,es,firehose,s3,sts

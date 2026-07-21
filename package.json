@@ -20,15 +20,15 @@
 	},
 	"packageManager": "npm@10.9.2",
 	"engines": {
-		"node": ">=22"
+		"node": ">=24"
 	},
 	"workspaces": [
 		"config/*",
 		"packages/*"
 	],
 	"devDependencies": {
-		"prettier": "^3.5.3",
-		"turbo": "^2.5.0",
-		"typescript": "^5.8.3"
+		"prettier": "^3.9.5",
+		"turbo": "^2.10.5",
+		"typescript": "^5.9.3"
 	}
 }
