@@ -85,11 +85,20 @@ export class ConnectionPool extends EventEmitter {
 	}
 
 	/**
-	 * Close a specific connection
+	 * Close a specific connection.
 	 *
 	 * @param {string} connectionId The id of the connection to close
+	 * @param {number} [leaseId] When given, close only if the connection still carries this lease.
+	 *   This mirrors {@link releaseConnection}'s guard so a caller holding a stale id cannot tear down
+	 *   a connection that has since been recycled and re-leased to a different client.
 	 */
-	closeConnection(connectionId: string): void {
+	closeConnection(connectionId: string, leaseId?: number): void {
+		if (leaseId !== undefined) {
+			const connection = this.connections.get(connectionId);
+			if (!connection || connection.leaseId !== leaseId) {
+				return;
+			}
+		}
 		this.removeConnection(connectionId);
 	}
 

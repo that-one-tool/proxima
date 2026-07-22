@@ -52,6 +52,34 @@ describe('getConfig', () => {
 		});
 	});
 
+	describe('boolean parsing (#6)', () => {
+		it('reads booleans case-insensitively so TRUE does not silently disable a check', () => {
+			process.env.TLS_SERVER_REJECT_UNAUTHORIZED = 'TRUE';
+
+			expect(getConfig().tlsServerOptions.tlsOptions?.rejectUnauthorized).toBe(true);
+		});
+
+		it('accepts alternative truthy tokens (Yes / On / 1)', () => {
+			process.env.TLS_SERVER_ENABLED = 'Yes';
+			process.env.TLS_SERVER_CERT_PATH = '/tmp/cert.pem';
+			process.env.TLS_SERVER_KEY_PATH = '/tmp/key.pem';
+
+			expect(getConfig().tlsServerOptions.useTls).toBe(true);
+		});
+
+		it('accepts alternative falsey tokens (0 / Off / No)', () => {
+			process.env.TLS_SERVER_REJECT_UNAUTHORIZED = '0';
+
+			expect(getConfig().tlsServerOptions.tlsOptions?.rejectUnauthorized).toBe(false);
+		});
+
+		it('exits when a boolean env var has an unrecognized value', () => {
+			process.env.TLS_SERVER_REJECT_UNAUTHORIZED = 'maybe';
+
+			expectGetConfigToExit();
+		});
+	});
+
 	describe('list parsing', () => {
 		it('turns an empty blacklist into an empty array, not [""]', () => {
 			process.env.IP_BLACKLIST = '';
@@ -104,6 +132,26 @@ describe('getConfig', () => {
 		it('exits when min pool connections exceed max', () => {
 			process.env.FORWARD_SERVICE_MIN_POOL_CONNECTIONS = '100';
 			process.env.FORWARD_SERVICE_MAX_POOL_CONNECTIONS = '20';
+
+			expectGetConfigToExit();
+		});
+
+		it('exits when a numeric env var has trailing garbage instead of silently truncating it', () => {
+			process.env.TRUSTED_HTTP_PORT = '9101abc';
+
+			expectGetConfigToExit();
+		});
+
+		it('exits when TLS is enabled but the certificate path is empty', () => {
+			process.env.TLS_SERVER_ENABLED = 'true';
+			process.env.TLS_SERVER_KEY_PATH = '/tmp/key.pem';
+
+			expectGetConfigToExit();
+		});
+
+		it('exits when TLS is enabled but the key path is empty', () => {
+			process.env.TLS_CLIENT_ENABLED = 'true';
+			process.env.TLS_CLIENT_CERT_PATH = '/tmp/cert.pem';
 
 			expectGetConfigToExit();
 		});

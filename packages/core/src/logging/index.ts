@@ -1,5 +1,30 @@
 import winston from 'winston';
+import { ContextualError } from '../errors';
 import { LoggerOptions } from './types';
+
+/**
+ * The codebase logs errors as `{ error: <Error> }` meta. Plain `winston.format.errors` only unwraps
+ * an Error passed as the log *message*, so an Error tucked in meta serialized to `{}` (or leaked the
+ * private `_context` backing field) — its `.message`/`.stack` never reached the log line. This format
+ * lifts a meta `error` into an explicit, JSON-safe object so those fields actually surface.
+ */
+function serializeError(error: Error): Record<string, unknown> {
+	const serialized: Record<string, unknown> = { name: error.name, message: error.message, stack: error.stack };
+	if (error instanceof ContextualError && error.context !== undefined) {
+		serialized.context = error.context;
+	}
+	if (error.cause !== undefined) {
+		serialized.cause = error.cause instanceof Error ? serializeError(error.cause) : error.cause;
+	}
+	return serialized;
+}
+
+const surfaceErrorMeta = winston.format((info) => {
+	if (info.error instanceof Error) {
+		info.error = serializeError(info.error);
+	}
+	return info;
+});
 
 export class Logger {
 	private static instance: Logger;
@@ -14,7 +39,12 @@ export class Logger {
 			level: options.level ?? 'info',
 			format:
 				options.format ??
-				winston.format.combine(winston.format.errors({ stack: true }), winston.format.timestamp(), winston.format.json()),
+				winston.format.combine(
+					winston.format.errors({ stack: true }),
+					surfaceErrorMeta(),
+					winston.format.timestamp(),
+					winston.format.json(),
+				),
 			transports: options.transports ?? [new winston.transports.Console()],
 			silent: options.silent ?? false,
 		};

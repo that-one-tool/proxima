@@ -41,6 +41,12 @@ export class LeasedConnection {
 	}
 
 	write(data: Buffer): boolean {
+		// Once the lease is detached the underlying socket has been released (and likely destroyed or
+		// re-leased to another client). Dropping the write here keeps late client bytes from being
+		// written to a socket this session no longer owns.
+		if (this.isDetached) {
+			return false;
+		}
 		return this.connection.socket.write(data);
 	}
 

@@ -56,24 +56,42 @@ function getEnvList(name: string): string[] {
 		.filter((entry) => entry.length > 0);
 }
 
+const TRUTHY_BOOL_VALUES = new Set(['true', '1', 'yes', 'on']);
+const FALSEY_BOOL_VALUES = new Set(['false', '0', 'no', 'off']);
+
 function getEnvBool(name: string, defaultValue: boolean): boolean {
 	const raw = process.env[name];
-	if (raw === undefined || raw === '') {
+	if (raw === undefined || raw.trim() === '') {
 		return defaultValue;
 	}
-	return raw === 'true';
+	const normalized = raw.trim().toLowerCase();
+	if (TRUTHY_BOOL_VALUES.has(normalized)) {
+		return true;
+	}
+	if (FALSEY_BOOL_VALUES.has(normalized)) {
+		return false;
+	}
+	// Fail fast like parseEnvInt does, rather than silently coercing an unrecognized value to false
+	// (which previously turned e.g. TLS_SERVER_REJECT_UNAUTHORIZED=TRUE into a disabled check).
+	throw new ContextualError(`Invalid boolean for environment variable ${name}`, {
+		context: { name, raw, expected: [...TRUTHY_BOOL_VALUES, ...FALSEY_BOOL_VALUES] },
+	});
 }
+
+const INTEGER_PATTERN = /^[+-]?\d+$/;
 
 function parseEnvInt(name: string, defaultValue: number): number {
 	const raw = process.env[name];
 	if (!raw) {
 		return defaultValue;
 	}
-	const value = parseInt(raw, 10);
-	if (Number.isNaN(value)) {
+	const trimmed = raw.trim();
+	// parseInt stops at the first non-digit, so '9101abc' silently became 9101. Require the whole
+	// value to be a clean integer instead.
+	if (!INTEGER_PATTERN.test(trimmed)) {
 		throw new ContextualError(`Invalid integer for environment variable ${name}`, { context: { name, raw } });
 	}
-	return value;
+	return parseInt(trimmed, 10);
 }
 
 function getEnvInt(name: string, defaultValue: number, range: IntRange = {}): number {
@@ -194,5 +212,26 @@ function getTlsServerOptions(): TlsServerClientOptions {
 }
 
 function buildTlsOptions(enabledVar: string, tlsOptions: TlsOptions): TlsServerClientOptions {
-	return getEnvBool(enabledVar, false) ? { useTls: true, tlsOptions } : { useTls: false, tlsOptions };
+	if (!getEnvBool(enabledVar, false)) {
+		return { useTls: false, tlsOptions };
+	}
+	assertTlsMaterial(enabledVar, tlsOptions);
+	return { useTls: true, tlsOptions };
+}
+
+// A TLS-enabled endpoint with no cert/key path only fails later, deep in the TLS layer. Reject it at
+// config load, where the offending variable is obvious.
+function assertTlsMaterial(enabledVar: string, tlsOptions: TlsOptions): void {
+	const missing: string[] = [];
+	if (tlsOptions.certPath.trim() === '') {
+		missing.push('certPath');
+	}
+	if (tlsOptions.keyPath.trim() === '') {
+		missing.push('keyPath');
+	}
+	if (missing.length > 0) {
+		throw new ContextualError(`${enabledVar} is enabled but required TLS material is missing`, {
+			context: { enabledVar, missing },
+		});
+	}
 }

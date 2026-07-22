@@ -165,7 +165,7 @@ describe('ProxyManager data forwarding', () => {
 		const pool = poolInstances[0];
 		const serviceSocket = new FakeSocket();
 		primePool(pool, serviceSocket);
-		manager.setFromClientTransformer((data) => Buffer.concat([Buffer.from('X'), data]));
+		manager.setFromClientTransformer(() => (data) => Buffer.concat([Buffer.from('X'), data]));
 
 		const client = new FakeSocket();
 		await listen(manager, config, client);
@@ -180,7 +180,7 @@ describe('ProxyManager data forwarding', () => {
 		const pool = poolInstances[0];
 		const serviceSocket = new FakeSocket();
 		primePool(pool, serviceSocket);
-		manager.setFromClientTransformer(() => {
+		manager.setFromClientTransformer(() => () => {
 			throw new Error('bad transform');
 		});
 
@@ -206,7 +206,26 @@ describe('ProxyManager service side termination', () => {
 		serviceSocket.emit('close');
 
 		expect(client.end).toHaveBeenCalled();
-		expect(pool.closeConnection).toHaveBeenCalledWith('C-1');
+		expect(pool.closeConnection).toHaveBeenCalledWith('C-1', 7);
+	});
+});
+
+describe('ProxyManager reverse-proxy bind failure (#8)', () => {
+	it('logs and emits failure when a proxy server errors, and drops it from the map', () => {
+		const config = makeConfig({ portMapping: { 7000: 'tenant:' } });
+		const manager = new ProxyManager(config);
+
+		const failure = jest.fn();
+		manager.on('failure', failure);
+		manager.startServers();
+
+		const proxy = (manager as unknown as { proxies: Map<string, EventEmitter> }).proxies.get('7000');
+		expect(proxy).toBeDefined();
+		// Attach a no-op extra listener so emitting 'error' never throws as an unhandled event.
+		proxy!.emit('error', Object.assign(new Error('bind failed'), { code: 'EADDRINUSE' }));
+
+		expect(failure).toHaveBeenCalledTimes(1);
+		expect((manager as unknown as { proxies: Map<string, EventEmitter> }).proxies.has('7000')).toBe(false);
 	});
 });
 

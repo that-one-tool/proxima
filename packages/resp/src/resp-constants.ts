@@ -113,12 +113,20 @@ export const KEY_POSITIONS: Record<string, KeyPattern> = {
 	zscan: [0],
 	zpopmin: [0],
 	zpopmax: [0],
+	zrandmember: [0],
+	zrangestore: [0, 1],
+	bitfield_ro: [0],
 	xadd: [0],
 	xlen: [0],
 	xrange: [0],
 	xrevrange: [0],
 	xdel: [0],
 	xtrim: [0],
+	xack: [0],
+	xclaim: [0],
+	xautoclaim: [0],
+	restore: [0],
+	move: [0],
 	geoadd: [0],
 	geopos: [0],
 	geodist: [0],
@@ -156,7 +164,10 @@ export type VariadicSpec =
 	| { kind: 'restButLast'; from: number } // keys from `from` to the second-to-last argument (last is a timeout)
 	| { kind: 'numkeyed'; countAt: number; extraKeys?: number[] } // a count at `countAt` precedes that many keys
 	| { kind: 'subcommandKey'; keyAt: number; subcommands: string[] } // key at `keyAt` only for the listed subcommands
-	| { kind: 'sort'; first: number }; // key at `first`, plus every BY/GET/STORE pattern (excluding the GET `#` self reference)
+	| { kind: 'sort'; first: number } // key at `first`, plus every BY/GET/STORE pattern (excluding the GET `#` self reference)
+	| { kind: 'radiusStore'; first: number } // key at `first`, plus each STORE/STOREDIST destination
+	| { kind: 'streams' } // the keys half of the `STREAMS key… id…` tail (XREAD / XREADGROUP)
+	| { kind: 'migrate' }; // key at index 2, or every key after a KEYS clause (multi-key MIGRATE)
 
 export const KEY_RESOLVERS: Record<string, VariadicSpec> = {
 	bitop: { kind: 'restFrom', from: 1 },
@@ -179,6 +190,12 @@ export const KEY_RESOLVERS: Record<string, VariadicSpec> = {
 	sort_ro: { kind: 'sort', first: 0 },
 	object: { kind: 'subcommandKey', keyAt: 1, subcommands: ['encoding', 'refcount', 'idletime', 'freq'] },
 	memory: { kind: 'subcommandKey', keyAt: 1, subcommands: ['usage'] },
+	georadius: { kind: 'radiusStore', first: 0 },
+	georadiusbymember: { kind: 'radiusStore', first: 0 },
+	xread: { kind: 'streams' },
+	xreadgroup: { kind: 'streams' },
+	xgroup: { kind: 'subcommandKey', keyAt: 1, subcommands: ['create', 'setid', 'destroy', 'createconsumer', 'delconsumer'] },
+	migrate: { kind: 'migrate' },
 };
 
 export const KEY_COMMANDS = [...Object.keys(KEY_POSITIONS), ...Object.keys(KEY_RESOLVERS)];

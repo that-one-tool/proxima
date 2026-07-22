@@ -3,7 +3,7 @@ import { Logger } from '../logging';
 import { LoggerOptions } from '../logging/types';
 import { ProxyManager } from '../proxy-manager';
 import { HttpServer } from '../servers/http-server';
-import { TransformerFunction } from '../types';
+import { TransformerFactory } from '../types';
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
 
@@ -25,9 +25,9 @@ export class Proxima {
 		this.logger.info('[Proxima] Proxima initialized');
 	}
 
-	addTransformers(fromClientTransformer: TransformerFunction, toClientTransformer: TransformerFunction): Proxima {
-		this.proxyManager.setFromClientTransformer(fromClientTransformer);
-		this.proxyManager.setToClientTransformer(toClientTransformer);
+	addTransformers(fromClientTransformerFactory: TransformerFactory, toClientTransformerFactory: TransformerFactory): Proxima {
+		this.proxyManager.setFromClientTransformer(fromClientTransformerFactory);
+		this.proxyManager.setToClientTransformer(toClientTransformerFactory);
 
 		return this;
 	}

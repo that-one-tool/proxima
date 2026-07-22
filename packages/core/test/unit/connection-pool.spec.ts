@@ -211,3 +211,59 @@ describe('ConnectionPool release requires a matching lease', () => {
 		expect(connection!.status).toBe(ConnectionStatus.BUSY);
 	});
 });
+
+describe('ConnectionPool close requires a matching lease (#6)', () => {
+	it('ignores a close with a stale lease id and keeps the connection', async () => {
+		const pool = makePool({ maxPoolConnections: 1 });
+		const connection = await pool.getConnection();
+		const socket = createdSockets[0];
+
+		pool.closeConnection(connection!.id, connection!.leaseId + 999);
+
+		expect(socket.destroy).not.toHaveBeenCalled();
+		expect(connection!.status).toBe(ConnectionStatus.BUSY);
+	});
+
+	it('closes the connection when the lease id matches', async () => {
+		const pool = makePool({ maxPoolConnections: 1 });
+		const connection = await pool.getConnection();
+		const socket = createdSockets[0];
+
+		pool.closeConnection(connection!.id, connection!.leaseId);
+
+		expect(socket.destroy).toHaveBeenCalled();
+	});
+
+	it('still closes unconditionally when no lease id is given', async () => {
+		const pool = makePool({ maxPoolConnections: 1 });
+		const connection = await pool.getConnection();
+		const socket = createdSockets[0];
+
+		pool.closeConnection(connection!.id);
+
+		expect(socket.destroy).toHaveBeenCalled();
+	});
+});
+
+describe('LeasedConnection write after detach (#6)', () => {
+	it('drops writes once the lease has been released', async () => {
+		const pool = makePool({ maxPoolConnections: 1 });
+		const leased = await pool.getConnection();
+		const socket = createdSockets[0];
+
+		pool.releaseConnection(leased!.id, leased!.leaseId); // detaches the lease
+
+		expect(leased!.write(Buffer.from('late'))).toBe(false);
+		expect(socket.write).not.toHaveBeenCalled();
+	});
+
+	it('writes normally while the lease is active', async () => {
+		const pool = makePool({ maxPoolConnections: 1 });
+		const leased = await pool.getConnection();
+		const socket = createdSockets[0];
+		socket.write.mockReturnValue(true);
+
+		expect(leased!.write(Buffer.from('hi'))).toBe(true);
+		expect(socket.write).toHaveBeenCalledWith(Buffer.from('hi'));
+	});
+});

@@ -1,7 +1,13 @@
-import { prefixRedisKeys, removePrefixFromRedisResponse } from '../../src/resp-handling';
+import { createKeyPrefixer, createResponseStripper, prefixRedisKeys, removePrefixFromRedisResponse, SessionTransformer } from '../../src/resp-handling';
 import { KEY_COMMANDS } from '../../src/resp-constants';
 
 const CRLF = Buffer.from('\r\n');
+
+/** A request/response transformer pair that shares one per-session correlation context. */
+function respSession(): { request: SessionTransformer; response: SessionTransformer } {
+	const session: Record<string, unknown> = {};
+	return { request: createKeyPrefixer(session), response: createResponseStripper(session) };
+}
 
 function bulk(value: Buffer): Buffer {
 	return Buffer.concat([Buffer.from(`$${value.length}\r\n`), value, CRLF]);
@@ -381,6 +387,288 @@ describe('variadic key commands (A4-#7 follow-up)', () => {
 	it('prefixes the MEMORY USAGE key but not the subcommand', () => {
 		const input = command('MEMORY', 'USAGE', 'mykey');
 		const expected = command('MEMORY', 'USAGE', 'test:mykey');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+});
+
+describe('createKeyPrefixer — stream reassembly (findings #1/#2)', () => {
+	const prefix = 'test:';
+
+	function feed(transform: SessionTransformer, chunks: Buffer[]): Buffer {
+		return Buffer.concat(chunks.map((chunk) => transform(chunk, prefix)));
+	}
+
+	it('reassembles a >64KB bulk value split across a TCP boundary and prefixes the key exactly once', () => {
+		// A value larger than a socket read forces the frame across chunks — the case that leaked
+		// the key UNPREFIXED with the old per-chunk transform (finding #1).
+		const value = Buffer.from('x'.repeat(200 * 1024));
+		const full = command('SET', 'big', value);
+		const split = Math.floor(full.length / 2);
+		const { request } = respSession();
+
+		const output = feed(request, [full.subarray(0, split), full.subarray(split)]);
+
+		expect(output).toEqual(command('SET', 'test:big', value));
+	});
+
+	it('reassembles a value containing CRLF bytes split mid-value', () => {
+		const value = Buffer.from('ab\r\ncd\r\nef');
+		const full = command('SET', 'k', value);
+		const { request } = respSession();
+
+		// Split inside the value, right after one of the embedded CRLFs, to prove framing is by
+		// declared length and not by scanning for CRLF.
+		const splitAt = full.indexOf(value) + 4;
+		const output = feed(request, [full.subarray(0, splitAt), full.subarray(splitAt)]);
+
+		expect(output).toEqual(command('SET', 'test:k', value));
+	});
+
+	it('prefixes every command of a pipeline even when the buffer splits mid-command', () => {
+		const full = Buffer.concat([command('GET', 'k1'), command('SET', 'k2', 'v'), command('DEL', 'k3')]);
+		const expected = Buffer.concat([command('GET', 'test:k1'), command('SET', 'test:k2', 'v'), command('DEL', 'test:k3')]);
+		const { request } = respSession();
+
+		// Split in the middle of the second command so its frame straddles the boundary.
+		const splitAt = command('GET', 'k1').length + 6;
+		const output = feed(request, [full.subarray(0, splitAt), full.subarray(splitAt)]);
+
+		expect(output).toEqual(expected);
+	});
+
+	it('keeps prefixing the command that follows an empty-array (*0) frame (finding #2)', () => {
+		const emptyArray = Buffer.from('*0\r\n');
+		const input = Buffer.concat([command('SET', 'before', 'a'), emptyArray, command('SET', 'after', 'b')]);
+		const expected = Buffer.concat([command('SET', 'test:before', 'a'), emptyArray, command('SET', 'test:after', 'b')]);
+		const { request } = respSession();
+
+		expect(request(input, prefix)).toEqual(expected);
+	});
+
+	it('keeps prefixing the command that follows a null-array (*-1) frame (finding #2)', () => {
+		const nullArray = Buffer.from('*-1\r\n');
+		const input = Buffer.concat([command('SET', 'before', 'a'), nullArray, command('GET', 'after')]);
+		const expected = Buffer.concat([command('SET', 'test:before', 'a'), nullArray, command('GET', 'test:after')]);
+		const { request } = respSession();
+
+		expect(request(input, prefix)).toEqual(expected);
+	});
+
+	it('buffers an incomplete trailing frame and prefixes it once the remainder arrives', () => {
+		const full = command('GET', 'mykey');
+		const { request } = respSession();
+
+		const first = request(full.subarray(0, full.length - 3), prefix);
+		const second = request(full.subarray(full.length - 3), prefix);
+
+		expect(first).toEqual(Buffer.alloc(0));
+		expect(Buffer.concat([first, second])).toEqual(command('GET', 'test:mykey'));
+	});
+
+	it('keeps per-session buffers isolated between two concurrent sessions', () => {
+		const full = command('GET', 'shared');
+		const split = 8;
+		const a = respSession();
+		const b = respSession();
+
+		// Interleave two half-delivered frames on separate sessions; neither may absorb the other's bytes.
+		a.request(full.subarray(0, split), prefix);
+		b.request(full.subarray(0, split), prefix);
+		const outA = a.request(full.subarray(split), prefix);
+		const outB = b.request(full.subarray(split), prefix);
+
+		expect(outA).toEqual(command('GET', 'test:shared'));
+		expect(outB).toEqual(command('GET', 'test:shared'));
+	});
+});
+
+describe('createResponseStripper — correlated stripping (finding #3)', () => {
+	const prefix = 'test:';
+
+	it('does NOT strip a GET value whose bytes start with the tenant prefix', () => {
+		// The headline #3 corruption: a stored VALUE that happens to begin with the prefix must
+		// round-trip verbatim, because GET is known not to return keys.
+		const { request, response } = respSession();
+		request(command('GET', 'vp'), prefix);
+
+		const reply = bulk(Buffer.from('test:legit-payload'));
+
+		expect(response(reply, prefix)).toEqual(reply);
+	});
+
+	it('does NOT strip MGET values even when a value starts with the prefix', () => {
+		const { request, response } = respSession();
+		request(command('MGET', 'a', 'b'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:v1')), bulk(Buffer.from('plain')));
+
+		expect(response(reply, prefix)).toEqual(reply);
+	});
+
+	it('strips the tenant prefix from a KEYS reply', () => {
+		const { request, response } = respSession();
+		request(command('KEYS', '*'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:k1')), bulk(Buffer.from('test:k2')));
+		const expected = respArray(bulk(Buffer.from('k1')), bulk(Buffer.from('k2')));
+
+		expect(response(reply, prefix)).toEqual(expected);
+	});
+
+	it('strips the prefix from a RANDOMKEY bulk reply', () => {
+		const { request, response } = respSession();
+		request(command('RANDOMKEY'), prefix);
+
+		expect(response(bulk(Buffer.from('test:chosen')), prefix)).toEqual(bulk(Buffer.from('chosen')));
+	});
+
+	it('strips SCAN result keys but leaves the numeric cursor untouched', () => {
+		const { request, response } = respSession();
+		request(command('SCAN', '0'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('17')), respArray(bulk(Buffer.from('test:k1')), bulk(Buffer.from('test:k2'))));
+		const expected = respArray(bulk(Buffer.from('17')), respArray(bulk(Buffer.from('k1')), bulk(Buffer.from('k2'))));
+
+		expect(response(reply, prefix)).toEqual(expected);
+	});
+
+	it('correlates pipelined replies in FIFO order: a value is preserved, the following KEYS is stripped', () => {
+		const { request, response } = respSession();
+		request(Buffer.concat([command('GET', 'v'), command('KEYS', '*')]), prefix);
+
+		const getReply = bulk(Buffer.from('test:value'));
+		const keysReply = respArray(bulk(Buffer.from('test:k1')));
+		const expected = Buffer.concat([getReply, respArray(bulk(Buffer.from('k1')))]);
+
+		expect(response(Buffer.concat([getReply, keysReply]), prefix)).toEqual(expected);
+	});
+
+	it('reassembles a KEYS reply split across a TCP boundary before stripping', () => {
+		const { request, response } = respSession();
+		request(command('KEYS', '*'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:k1')), bulk(Buffer.from('test:k2')));
+		const split = Math.floor(reply.length / 2);
+		const output = Buffer.concat([response(reply.subarray(0, split), prefix), response(reply.subarray(split), prefix)]);
+
+		expect(output).toEqual(respArray(bulk(Buffer.from('k1')), bulk(Buffer.from('k2'))));
+	});
+
+	it('passes an unexpected reply (empty correlation queue) through unchanged', () => {
+		const { response } = respSession();
+
+		const reply = bulk(Buffer.from('test:whatever'));
+
+		expect(response(reply, prefix)).toEqual(reply);
+	});
+
+	it('stops stripping once the session subscribes, so a pub/sub message is never rewritten', () => {
+		const { request, response } = respSession();
+		request(command('SUBSCRIBE', 'ch'), prefix);
+
+		// A pub/sub message push is structurally identical to a KEYS reply; correlation loss must
+		// keep it verbatim so a payload starting with the prefix is not corrupted.
+		const push = respArray(bulk(Buffer.from('message')), bulk(Buffer.from('ch')), bulk(Buffer.from('test:payload')));
+
+		expect(response(push, prefix)).toEqual(push);
+	});
+
+	it('stops stripping after an inline (non-RESP) request breaks correlation', () => {
+		const { request, response } = respSession();
+		request(Buffer.from('PING\r\n'), prefix);
+		request(command('KEYS', '*'), prefix); // would normally queue a strip, but correlation is already lost
+
+		const reply = respArray(bulk(Buffer.from('test:k1')));
+
+		expect(response(reply, prefix)).toEqual(reply);
+	});
+});
+
+describe('expanded key-command whitelist (finding #5)', () => {
+	const prefix = 'test:';
+
+	it('prefixes both the destination and source of ZRANGESTORE', () => {
+		const input = command('ZRANGESTORE', 'dest', 'src', '0', '-1');
+		const expected = command('ZRANGESTORE', 'test:dest', 'test:src', '0', '-1');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the key of BITFIELD_RO but not its GET arguments', () => {
+		const input = command('BITFIELD_RO', 'mykey', 'GET', 'u8', '0');
+		const expected = command('BITFIELD_RO', 'test:mykey', 'GET', 'u8', '0');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the key of ZRANDMEMBER', () => {
+		const input = command('ZRANDMEMBER', 'myset', '3');
+		const expected = command('ZRANDMEMBER', 'test:myset', '3');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes only the stream key of XACK / XCLAIM / XAUTOCLAIM', () => {
+		expect(prefixRedisKeys(command('XACK', 's', 'grp', '1-0'), prefix)).toEqual(command('XACK', 'test:s', 'grp', '1-0'));
+		expect(prefixRedisKeys(command('XCLAIM', 's', 'grp', 'c', '0', '1-0'), prefix)).toEqual(
+			command('XCLAIM', 'test:s', 'grp', 'c', '0', '1-0'),
+		);
+		expect(prefixRedisKeys(command('XAUTOCLAIM', 's', 'grp', 'c', '0', '0'), prefix)).toEqual(
+			command('XAUTOCLAIM', 'test:s', 'grp', 'c', '0', '0'),
+		);
+	});
+
+	it('prefixes the key of RESTORE and MOVE', () => {
+		expect(prefixRedisKeys(command('RESTORE', 'k', '0', 'payload'), prefix)).toEqual(command('RESTORE', 'test:k', '0', 'payload'));
+		expect(prefixRedisKeys(command('MOVE', 'k', '1'), prefix)).toEqual(command('MOVE', 'test:k', '1'));
+	});
+
+	it('prefixes the GEORADIUS source key and its STORE destination, not the geo args', () => {
+		const input = command('GEORADIUS', 'geo', '15', '37', '200', 'km', 'STORE', 'dest');
+		const expected = command('GEORADIUS', 'test:geo', '15', '37', '200', 'km', 'STORE', 'test:dest');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the GEORADIUSBYMEMBER key and STOREDIST destination but not the member', () => {
+		const input = command('GEORADIUSBYMEMBER', 'geo', 'member', '200', 'km', 'STOREDIST', 'dest');
+		const expected = command('GEORADIUSBYMEMBER', 'test:geo', 'member', '200', 'km', 'STOREDIST', 'test:dest');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the stream keys of XREAD but not the COUNT option or the IDs', () => {
+		const input = command('XREAD', 'COUNT', '2', 'STREAMS', 's1', 's2', '0', '0');
+		const expected = command('XREAD', 'COUNT', '2', 'STREAMS', 'test:s1', 'test:s2', '0', '0');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the stream key of XREADGROUP but not the group, consumer or ID', () => {
+		const input = command('XREADGROUP', 'GROUP', 'g', 'c', 'STREAMS', 's1', '>');
+		const expected = command('XREADGROUP', 'GROUP', 'g', 'c', 'STREAMS', 'test:s1', '>');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the XGROUP CREATE stream key but not a keyless XGROUP HELP', () => {
+		expect(prefixRedisKeys(command('XGROUP', 'CREATE', 'mystream', 'grp', '$'), prefix)).toEqual(
+			command('XGROUP', 'CREATE', 'test:mystream', 'grp', '$'),
+		);
+		expect(prefixRedisKeys(command('XGROUP', 'HELP'), prefix)).toEqual(command('XGROUP', 'HELP'));
+	});
+
+	it('prefixes the single key of a MIGRATE, not the host/port/db/timeout', () => {
+		const input = command('MIGRATE', '127.0.0.1', '6379', 'mykey', '0', '5000');
+		const expected = command('MIGRATE', '127.0.0.1', '6379', 'test:mykey', '0', '5000');
+
+		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+
+	it('prefixes the KEYS clause of a multi-key MIGRATE and leaves the empty key slot untouched', () => {
+		const input = command('MIGRATE', '127.0.0.1', '6379', '', '0', '5000', 'KEYS', 'k1', 'k2');
+		const expected = command('MIGRATE', '127.0.0.1', '6379', '', '0', '5000', 'KEYS', 'test:k1', 'test:k2');
 
 		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
 	});

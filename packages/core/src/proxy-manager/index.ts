@@ -7,7 +7,7 @@ import { LeasedConnection } from '../connection-pool/leased-connection';
 import { ContextualError } from '../errors';
 import { Logger } from '../logging';
 import { ServerBuilder } from '../servers/tcp-tls-server-builder';
-import { TransformerFunction } from '../types';
+import { SessionState, TransformerFactory, TransformerFunction } from '../types';
 
 const ALLOW_ALL_IPS = '*.*.*.*';
 
@@ -18,8 +18,8 @@ interface WritableEndpoint {
 
 export class ProxyManager extends EventEmitter {
 	private config: Config;
-	private fromClientTransformer: TransformerFunction;
-	private toClientTransformer: TransformerFunction;
+	private fromClientTransformerFactory: TransformerFactory;
+	private toClientTransformerFactory: TransformerFactory;
 	private serviceConnectionPool: ConnectionPool;
 	private logger: Logger;
 
@@ -60,12 +60,12 @@ export class ProxyManager extends EventEmitter {
 		return connectionPool;
 	}
 
-	setFromClientTransformer(transformFromClient: TransformerFunction): void {
-		this.fromClientTransformer = transformFromClient;
+	setFromClientTransformer(transformFromClientFactory: TransformerFactory): void {
+		this.fromClientTransformerFactory = transformFromClientFactory;
 	}
 
-	setToClientTransformer(transformToClient: TransformerFunction): void {
-		this.toClientTransformer = transformToClient;
+	setToClientTransformer(transformToClientFactory: TransformerFactory): void {
+		this.toClientTransformerFactory = transformToClientFactory;
 	}
 
 	startServers(): void {
@@ -83,6 +83,10 @@ export class ProxyManager extends EventEmitter {
 				this.logger.info('[ProxyManager] Reverse proxy closed gracefully', { port, mapping });
 				this.handleClosedProxy(port);
 			});
+
+			proxy.on('error', (error: Error) => {
+				this.handleProxyError(port, mapping, error);
+			});
 		}
 
 		this.emit('ready');
@@ -94,6 +98,21 @@ export class ProxyManager extends EventEmitter {
 		if (this.proxies.size === 0) {
 			this.emit('closed');
 		}
+	}
+
+	/**
+	 * A reverse-proxy server failed to bind or crashed at runtime (e.g. EADDRINUSE). Without this the
+	 * error was swallowed, a dead server lingered in the map, and health kept reporting healthy. Log
+	 * the cause, drop the dead server, and surface a 'failure' so Proxima can exit non-zero.
+	 */
+	private handleProxyError(port: string, mapping: string, error: Error): void {
+		this.logger.error('[ProxyManager] Reverse proxy server error', {
+			port,
+			mapping,
+			error: new ContextualError('Reverse proxy server error', { cause: error, context: { port, mapping } }),
+		});
+		this.proxies.delete(port);
+		this.emit('failure');
 	}
 
 	async stopServers(): Promise<void> {
@@ -183,8 +202,16 @@ export class ProxyManager extends EventEmitter {
 		const { id: connectionId, leaseId } = service;
 		this.logger.debug('[ProxyManager] Using pooled connection to service for client', { requestId, connectionId });
 
-		const onClientData = (data: Buffer) => this.forwardWithTransform(data, this.fromClientTransformer, service, mapping, requestId);
-		const onServiceData = (data: Buffer) => this.forwardWithTransform(data, this.toClientTransformer, clientSocket, mapping, requestId);
+		// Instantiate a fresh transformer per session/direction so any per-session
+		// state (e.g. RESP frame-reassembly buffers) stays isolated to this connection.
+		// Both directions share one SessionState so the request and response sides can
+		// correlate (e.g. to strip the tenant prefix only from replies that carry keys).
+		const session: SessionState = {};
+		const fromClientTransformer = this.fromClientTransformerFactory?.(session);
+		const toClientTransformer = this.toClientTransformerFactory?.(session);
+
+		const onClientData = (data: Buffer) => this.forwardWithTransform(data, fromClientTransformer, service, mapping, requestId);
+		const onServiceData = (data: Buffer) => this.forwardWithTransform(data, toClientTransformer, clientSocket, mapping, requestId);
 
 		let ended = false;
 		const endSession = (destroy: boolean): void => {
@@ -247,7 +274,7 @@ export class ProxyManager extends EventEmitter {
 
 	private releaseOrClose(connectionId: string, leaseId: number, destroy: boolean): void {
 		if (destroy) {
-			this.serviceConnectionPool.closeConnection(connectionId);
+			this.serviceConnectionPool.closeConnection(connectionId, leaseId);
 			return;
 		}
 
