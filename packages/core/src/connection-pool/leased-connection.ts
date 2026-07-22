@@ -1,6 +1,6 @@
 import type { ConnectionStatus, PoolConnection } from './types';
 
-type SocketEvent = 'data' | 'close' | 'error';
+type SocketEvent = 'data' | 'close' | 'error' | 'drain';
 
 /**
  * A lease-scoped view over a pooled socket.
@@ -34,6 +34,7 @@ export class LeasedConnection {
 	on(event: 'data', handler: (data: Buffer) => void): this;
 	on(event: 'close', handler: (hadError: boolean) => void): this;
 	on(event: 'error', handler: (err: Error) => void): this;
+	on(event: 'drain', handler: () => void): this;
 	on(event: SocketEvent, handler: (...args: never[]) => void): this {
 		this.connection.socket.on(event, handler as (...args: unknown[]) => void);
 		this.registered.push({ event, handler });
@@ -48,6 +49,20 @@ export class LeasedConnection {
 			return false;
 		}
 		return this.connection.socket.write(data);
+	}
+
+	/** Stop the service socket from emitting `data`, applying backpressure toward the service. No-op once detached. */
+	pause(): void {
+		if (!this.isDetached) {
+			this.connection.socket.pause();
+		}
+	}
+
+	/** Resume the service socket after backpressure has cleared. No-op once detached. */
+	resume(): void {
+		if (!this.isDetached) {
+			this.connection.socket.resume();
+		}
 	}
 
 	/**

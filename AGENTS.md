@@ -4,7 +4,7 @@ Guidance for AI agents working in this repository. Keep it followed, keep it cur
 
 ## Project
 
-**Proxima** — a minimalist TCP reverse proxy with per-service transformation. The first transformer proxies RESP services (Redis, Valkey): it transparently prefixes keys on the way in and strips the prefix on the way out, so multiple tenants share one Redis instance with key isolation.
+**Proxima** — a minimalist TCP reverse proxy with per-service transformation. The first transformer proxies RESP services (Redis, Valkey): it transparently prefixes keys on the way in and strips the prefix on the way out, so multiple tenants share one Redis instance with key isolation. Isolation is enforced **default-deny**: only commands that can be safely scoped to the tenant prefix are forwarded (`KEYS`/`SCAN` are prefix-scoped); anything that would cross the tenant boundary — administrative/global commands, `RANDOMKEY`, `EVAL`, unknown commands — is rejected. See `packages/resp/README.md` for the policy tables (`PASSTHROUGH_COMMANDS`, `KEY_POSITIONS`, `KEY_RESOLVERS` in `resp-constants.ts`).
 
 ## Layout
 

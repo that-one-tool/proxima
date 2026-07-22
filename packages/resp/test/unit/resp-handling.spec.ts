@@ -42,9 +42,12 @@ describe('prefixRedisKeys', () => {
 		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
 	});
 
-	it('should not add prefix to keys that already have the prefix', () => {
+	it('prefixes unconditionally, even a key that already starts with the prefix (no aliasing)', () => {
+		// The request side is the sole prefixer: skipping an already-prefixed key would alias the client
+		// keys `mykey` and `test:mykey` onto the same physical key. A literal `test:mykey` becomes
+		// `test:test:mykey` and round-trips back to `test:mykey` after exactly one strip.
 		const input = Buffer.from('*2\r\n$3\r\nGET\r\n$10\r\ntest:mykey\r\n');
-		const expected = Buffer.from('*2\r\n$3\r\nGET\r\n$10\r\ntest:mykey\r\n');
+		const expected = Buffer.from('*2\r\n$3\r\nGET\r\n$15\r\ntest:test:mykey\r\n');
 
 		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
 	});
@@ -516,11 +519,13 @@ describe('createResponseStripper — correlated stripping (finding #3)', () => {
 		expect(response(reply, prefix)).toEqual(expected);
 	});
 
-	it('strips the prefix from a RANDOMKEY bulk reply', () => {
+	it('does not strip a reply to RANDOMKEY, which is denied and never reaches the service unmodified', () => {
+		// RANDOMKEY cannot be scoped to a prefix (it takes no pattern), so it is denied by C1 and draws an
+		// error reply. Any bulk that follows must therefore pass through verbatim.
 		const { request, response } = respSession();
 		request(command('RANDOMKEY'), prefix);
 
-		expect(response(bulk(Buffer.from('test:chosen')), prefix)).toEqual(bulk(Buffer.from('chosen')));
+		expect(response(bulk(Buffer.from('test:chosen')), prefix)).toEqual(bulk(Buffer.from('test:chosen')));
 	});
 
 	it('strips SCAN result keys but leaves the numeric cursor untouched', () => {
@@ -671,5 +676,125 @@ describe('expanded key-command whitelist (finding #5)', () => {
 		const expected = command('MIGRATE', '127.0.0.1', '6379', '', '0', '5000', 'KEYS', 'test:k1', 'test:k2');
 
 		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+	});
+});
+
+describe('C1 — default-deny isolation and KEYS/SCAN scoping', () => {
+	const prefix = 'test:';
+	const deniedSentinel = '__proxima_command_denied__';
+
+	function deniedFrame(originalName: string): Buffer {
+		return command(deniedSentinel, originalName);
+	}
+
+	describe('KEYS / SCAN scoping to the tenant prefix', () => {
+		it('scopes a KEYS pattern to the tenant prefix so it cannot enumerate the whole keyspace', () => {
+			expect(prefixRedisKeys(command('KEYS', '*'), prefix)).toEqual(command('KEYS', 'test:*'));
+			expect(prefixRedisKeys(command('KEYS', 'user:*'), prefix)).toEqual(command('KEYS', 'test:user:*'));
+		});
+
+		it('strips the prefix from a scoped KEYS reply', () => {
+			const { request, response } = respSession();
+			request(command('KEYS', '*'), prefix);
+
+			const reply = respArray(bulk(Buffer.from('test:k1')), bulk(Buffer.from('test:k2')));
+			expect(response(reply, prefix)).toEqual(respArray(bulk(Buffer.from('k1')), bulk(Buffer.from('k2'))));
+		});
+
+		it('prefixes an existing SCAN MATCH pattern', () => {
+			const input = command('SCAN', '0', 'MATCH', 'user:*', 'COUNT', '100');
+			const expected = command('SCAN', '0', 'MATCH', 'test:user:*', 'COUNT', '100');
+
+			expect(prefixRedisKeys(input, prefix)).toEqual(expected);
+		});
+
+		it('injects a MATCH clause scoped to the prefix when SCAN has none', () => {
+			expect(prefixRedisKeys(command('SCAN', '0'), prefix)).toEqual(command('SCAN', '0', 'MATCH', 'test:*'));
+			expect(prefixRedisKeys(command('SCAN', '0', 'COUNT', '10'), prefix)).toEqual(
+				command('SCAN', '0', 'COUNT', '10', 'MATCH', 'test:*'),
+			);
+		});
+
+		it('strips the keys of a scoped SCAN reply but leaves the cursor', () => {
+			const { request, response } = respSession();
+			request(command('SCAN', '0'), prefix);
+
+			const reply = respArray(bulk(Buffer.from('42')), respArray(bulk(Buffer.from('test:k1'))));
+			expect(response(reply, prefix)).toEqual(respArray(bulk(Buffer.from('42')), respArray(bulk(Buffer.from('k1')))));
+		});
+	});
+
+	describe('denial of commands that cannot be safely prefixed', () => {
+		it('denies RANDOMKEY (cannot be scoped)', () => {
+			expect(prefixRedisKeys(command('RANDOMKEY'), prefix)).toEqual(deniedFrame('RANDOMKEY'));
+		});
+
+		it('denies destructive / global admin commands', () => {
+			for (const name of ['FLUSHALL', 'FLUSHDB', 'SWAPDB', 'SHUTDOWN', 'CONFIG', 'DEBUG', 'MONITOR', 'REPLICAOF']) {
+				expect(prefixRedisKeys(command(name), prefix)).toEqual(deniedFrame(name));
+			}
+		});
+
+		it('denies cross-tenant read primitives that are not in the key table (SUBSTR, EVAL)', () => {
+			expect(prefixRedisKeys(command('SUBSTR', 'other:secret', '0', '-1'), prefix)).toEqual(deniedFrame('SUBSTR'));
+			expect(prefixRedisKeys(command('EVAL', "return redis.call('get', KEYS[1])", '1', 'other:secret'), prefix)).toEqual(
+				deniedFrame('EVAL'),
+			);
+		});
+
+		it('denies an unknown command by default (default-deny), preserving its name for the error', () => {
+			expect(prefixRedisKeys(command('TOTALLYMADEUP', 'x'), prefix)).toEqual(deniedFrame('TOTALLYMADEUP'));
+		});
+
+		it('records exactly one non-stripping reply expectation for a denied command', () => {
+			const { request, response } = respSession();
+			request(command('FLUSHALL'), prefix);
+
+			// The denied command draws one error reply; a value that follows must not be stripped.
+			const errorReply = Buffer.from("-ERR unknown command '__proxima_command_denied__'\r\n");
+			expect(response(errorReply, prefix)).toEqual(errorReply);
+		});
+	});
+
+	describe('safe passthrough commands', () => {
+		it('forwards keyless connection/transaction commands unchanged', () => {
+			for (const cmd of [command('PING'), command('HELLO', '2'), command('MULTI'), command('EXEC'), command('INFO')]) {
+				expect(prefixRedisKeys(cmd, prefix)).toEqual(cmd);
+			}
+		});
+	});
+
+	describe('inline (non-RESP) requests are denied, not forwarded unprefixed', () => {
+		it('replaces inline bytes with a denial frame so they never reach the service', () => {
+			const { request } = respSession();
+			// A malicious client could otherwise bypass prefixing with inline `GET other:secret\r\n`.
+			expect(request(Buffer.from('GET other:secret\r\n'), prefix)).toEqual(command('__proxima_command_denied__', 'inline'));
+		});
+	});
+});
+
+describe('H2 — RESP3 aggregate replies do not desync correlation', () => {
+	const prefix = 'test:';
+
+	it('stops correlating once the client negotiates HELLO 3, so a later SCAN reply is left verbatim (no corruption)', () => {
+		const { request, response } = respSession();
+		request(Buffer.concat([command('HELLO', '3'), command('SCAN', '0')]), prefix);
+
+		const helloMap = Buffer.concat([Buffer.from('%1\r\n'), bulk(Buffer.from('proto')), Buffer.from(':3\r\n')]);
+		const scanReply = respArray(bulk(Buffer.from('0')), respArray(bulk(Buffer.from('test:k1'))));
+		const input = Buffer.concat([helloMap, scanReply]);
+
+		// Fail-safe: correlation is dropped at HELLO 3, so everything passes through untouched — crucially
+		// no value bulk inside the RESP3 map is ever mis-stripped.
+		expect(response(input, prefix)).toEqual(input);
+	});
+
+	it('drops correlation if a RESP3 aggregate reply appears without a prior HELLO 3', () => {
+		const { request, response } = respSession();
+		request(command('GET', 'k'), prefix);
+
+		// A push/map arriving where the flat scanner expects a RESP2 reply must not be mis-framed.
+		const push = Buffer.concat([Buffer.from('>2\r\n'), bulk(Buffer.from('message')), bulk(Buffer.from('test:payload'))]);
+		expect(response(push, prefix)).toEqual(push);
 	});
 });

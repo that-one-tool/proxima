@@ -11,9 +11,17 @@ import { SessionState, TransformerFactory, TransformerFunction } from '../types'
 
 const ALLOW_ALL_IPS = '*.*.*.*';
 
-/** Anything the proxy can write forwarded bytes to: a raw client socket or a leased service connection. */
-interface WritableEndpoint {
+/** A readable side of a proxied connection that can be paused/resumed to apply backpressure. */
+interface BackpressureSource {
+	on(event: 'data', handler: (data: Buffer) => void): unknown;
+	pause(): void;
+	resume(): void;
+}
+
+/** A writable side of a proxied connection whose full write buffer surfaces via `write()` and `'drain'`. */
+interface DrainableDestination {
 	write(data: Buffer): boolean;
+	on(event: 'drain', handler: () => void): unknown;
 }
 
 export class ProxyManager extends EventEmitter {
@@ -210,8 +218,8 @@ export class ProxyManager extends EventEmitter {
 		const fromClientTransformer = this.fromClientTransformerFactory?.(session);
 		const toClientTransformer = this.toClientTransformerFactory?.(session);
 
-		const onClientData = (data: Buffer) => this.forwardWithTransform(data, fromClientTransformer, service, mapping, requestId);
-		const onServiceData = (data: Buffer) => this.forwardWithTransform(data, toClientTransformer, clientSocket, mapping, requestId);
+		this.pipe(clientSocket, service, fromClientTransformer, mapping, requestId);
+		this.pipe(service, clientSocket, toClientTransformer, mapping, requestId);
 
 		let ended = false;
 		const endSession = (destroy: boolean): void => {
@@ -234,8 +242,6 @@ export class ProxyManager extends EventEmitter {
 			endSession(true);
 		};
 
-		clientSocket.on('data', onClientData);
-		service.on('data', onServiceData);
 		clientSocket.on('close', () => endSession(false));
 		clientSocket.on('error', (err: Error) => {
 			this.logSocketError('Client socket error', err, requestId);
@@ -243,17 +249,43 @@ export class ProxyManager extends EventEmitter {
 		});
 		service.on('close', onServiceClose);
 		service.on('error', onServiceError);
+
+		this.applyClientIdleTimeout(clientSocket, requestId, endSession);
 	}
 
-	private forwardWithTransform(
-		data: Buffer,
-		transformer: TransformerFunction,
-		destination: WritableEndpoint,
-		mapping: string,
-		requestId: string,
-	): void {
-		const dataToForward = transformer ? this.applyTransform(transformer, data, mapping, requestId) : data;
-		destination.write(dataToForward);
+	/**
+	 * Wires one direction of the proxy with flow control: transformed bytes are written to the
+	 * destination, and when its write buffer is full the source is paused until the destination drains.
+	 * Without this a slow peer would let the fast side buffer without bound (memory-growth / OOM vector).
+	 */
+	private pipe(source: BackpressureSource, destination: DrainableDestination, transformer: TransformerFunction, mapping: string, requestId: string): void {
+		source.on('data', (data: Buffer) => {
+			const dataToForward = transformer ? this.applyTransform(transformer, data, mapping, requestId) : data;
+			if (!dataToForward.length) {
+				return;
+			}
+			if (!destination.write(dataToForward)) {
+				source.pause();
+			}
+		});
+		destination.on('drain', () => source.resume());
+	}
+
+	/**
+	 * Closes an idle client connection so its pooled service connection is released back to the pool.
+	 * Without this a client that connects and goes silent pins its leased connection forever, and enough
+	 * such clients exhaust the pool and starve every other client. Disabled when the timeout is 0.
+	 */
+	private applyClientIdleTimeout(clientSocket: net.Socket, requestId: string, endSession: (destroy: boolean) => void): void {
+		const timeoutMs = this.config.clientIdleTimeoutMs;
+		if (!timeoutMs) {
+			return;
+		}
+		clientSocket.setTimeout(timeoutMs, () => {
+			this.logger.info('[ProxyManager] Client idle timeout reached, closing connection', { requestId, timeoutMs });
+			clientSocket.end();
+			endSession(false);
+		});
 	}
 
 	private applyTransform(

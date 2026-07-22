@@ -18,6 +18,7 @@
 				"IP_WHITELIST",
 				"PORT_MAPPING",
 				"TRUSTED_HTTP_PORT",
+				"CLIENT_IDLE_TIMEOUT_MS",
 				"VERSION"
 			]
 		}

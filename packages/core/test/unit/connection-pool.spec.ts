@@ -20,6 +20,8 @@ class FakeSocket extends EventEmitter {
 	write = jest.fn();
 	end = jest.fn();
 	setTimeout = jest.fn();
+	pause = jest.fn();
+	resume = jest.fn();
 	destroy = jest.fn(() => {
 		this.destroyed = true;
 		this.emit('close');
@@ -265,5 +267,25 @@ describe('LeasedConnection write after detach (#6)', () => {
 
 		expect(leased!.write(Buffer.from('hi'))).toBe(true);
 		expect(socket.write).toHaveBeenCalledWith(Buffer.from('hi'));
+	});
+});
+
+describe('LeasedConnection pause/resume for backpressure (M5)', () => {
+	it('delegates pause/resume to the socket while active and no-ops once detached', async () => {
+		const pool = makePool({ maxPoolConnections: 1 });
+		const leased = await pool.getConnection();
+		const socket = createdSockets[0];
+
+		leased!.pause();
+		leased!.resume();
+		expect(socket.pause).toHaveBeenCalledTimes(1);
+		expect(socket.resume).toHaveBeenCalledTimes(1);
+
+		pool.releaseConnection(leased!.id, leased!.leaseId); // detaches the lease
+
+		leased!.pause();
+		leased!.resume();
+		expect(socket.pause).toHaveBeenCalledTimes(1);
+		expect(socket.resume).toHaveBeenCalledTimes(1);
 	});
 });

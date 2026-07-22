@@ -41,12 +41,37 @@ describe('per-tenant isolation (end-to-end)', () => {
 		assert.equal(await env.directClient.get('tenant-a:protected'), 'keep', 'tenant B DEL must not touch tenant A key');
 	});
 
-	it('KEYS-style scans stay within a tenant namespace', async () => {
+	it('KEYS is scoped to the tenant namespace and returns un-prefixed names', async () => {
 		await env.tenants.tenantA.client.set('scoped', '1');
-		await env.tenants.tenantB.client.set('scoped', '2');
+		await env.tenants.tenantA.client.set('a-only-key', 'x');
+		await env.tenants.tenantB.client.set('b-only-key', '2');
 
-		assert.equal(await env.directClient.get('tenant-a:scoped'), '1');
-		assert.equal(await env.directClient.get('tenant-b:scoped'), '2');
-		assert.equal(await env.tenants.tenantB.client.get('scoped'), '2');
+		const aKeys = await env.tenants.tenantA.client.keys('*');
+		assert.ok(aKeys.includes('scoped'), 'tenant A sees its own keys');
+		assert.ok(aKeys.includes('a-only-key'));
+		assert.ok(!aKeys.includes('b-only-key'), 'tenant A must not see tenant B keys via KEYS');
+		assert.ok(
+			!aKeys.some((key) => key.startsWith('tenant-a:') || key.startsWith('tenant-b:')),
+			'returned key names must have the tenant prefix stripped',
+		);
+
+		const bKeys = await env.tenants.tenantB.client.keys('*');
+		assert.ok(!bKeys.includes('a-only-key'), 'tenant B must not see tenant A keys via KEYS');
+	});
+
+	it('SCAN stays within the tenant namespace', async () => {
+		await env.tenants.tenantA.client.set('scan-a', '1');
+		await env.tenants.tenantB.client.set('scan-b', '2');
+
+		const seen: string[] = [];
+		let cursor = '0';
+		do {
+			const [next, batch] = await env.tenants.tenantA.client.scan(cursor);
+			cursor = next;
+			seen.push(...batch);
+		} while (cursor !== '0');
+
+		assert.ok(seen.includes('scan-a'), 'SCAN surfaces tenant A keys un-prefixed');
+		assert.ok(!seen.includes('scan-b'), 'SCAN must not surface tenant B keys');
 	});
 });

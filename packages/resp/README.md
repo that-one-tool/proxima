@@ -10,6 +10,9 @@ Proxima implementation for proxying RESP compatible services (Redis, Valkey, ...
 - Different prefixes can be configured for different ports
 - Preserves the Redis RESP protocol format
 - Multiple tenants can share a single Redis instance with key isolation
+- **Default-deny command policy**: only commands the proxy can safely scope to the tenant prefix are
+  forwarded; `KEYS`/`SCAN` are scoped to the prefix, and anything that would cross the tenant boundary
+  (`FLUSHALL`, `SWAPDB`, `CONFIG`, `RANDOMKEY`, `EVAL`, `SUBSTR`, unknown commands, …) is rejected
 - IP whitelist and blacklist for access control
 
 ## Configuration
@@ -23,6 +26,8 @@ Proxima implementation for proxying RESP compatible services (Redis, Valkey, ...
 - `REDIS_PORT`: Redis server port (default: 6379)
 - `IP_WHITELIST`: Comma-separated list of IP addresses allowed to connect (use "_._._._" to allow all)
 - `IP_BLACKLIST`: Comma-separated list of IP addresses that are blocked from connecting
+- `CLIENT_IDLE_TIMEOUT_MS`: Close a client connection (and release its pooled service connection) after this many
+  milliseconds of inactivity, preventing idle clients from exhausting the pool. `0` (default) disables it.
 
 ### Examples
 
@@ -142,4 +147,34 @@ Commands whose key positions depend on a variadic count, a subcommand, or an opt
 - **A key only for certain subcommands** — `OBJECT` (`ENCODING`/`REFCOUNT`/`IDLETIME`/`FREQ`) and `MEMORY` (`USAGE`).
 - **`SORT`/`SORT_RO`** — the source key plus every `BY`, `GET`, and `STORE` pattern; the `GET #` self-reference is left untouched.
 
-**Not yet covered:** Lua-script and function key arguments (`EVAL`/`EVALSHA`/`FCALL` `numkeys`) are out of scope — scripts must namespace their own keys.
+## Command isolation (default-deny)
+
+Isolation is enforced as an **allowlist**: a client command is forwarded to the shared service only if the
+proxy can guarantee it stays within the tenant's namespace. Everything else is denied — the frame is
+rewritten to a harmless unknown-command so the service answers with an error, without ever executing the
+forbidden command (this preserves one-reply-per-command ordering). The policy tables live in
+`src/resp-constants.ts`.
+
+- **Prefixed** — the ~120 key commands above (`KEY_POSITIONS` / `KEY_RESOLVERS`). Keys are always
+  prefixed, even a key that already starts with the prefix (skipping it would alias `foo` with
+  `<prefix>foo`).
+- **Scoped** — `KEYS <pattern>` becomes `KEYS <prefix><pattern>`, and `SCAN` has its `MATCH` pattern
+  prefixed (a scoped `MATCH <prefix>*` is injected when the client omits it), so neither can enumerate
+  another tenant's keys. Their replies are un-prefixed on the way back.
+- **Passthrough** — keyless commands that do not cross the key boundary: connection/handshake
+  (`PING`, `ECHO`, `HELLO`, `AUTH`, `SELECT`, `RESET`, `CLIENT`, `COMMAND`, `INFO`, …), transactions
+  (`MULTI`/`EXEC`/`DISCARD`/`UNWATCH`), and pub/sub. Extend `PASSTHROUGH_COMMANDS` to permit more.
+- **Denied** — everything else, including administrative/global commands (`FLUSHALL`, `FLUSHDB`,
+  `SWAPDB`, `CONFIG`, `SHUTDOWN`, `DEBUG`, `MONITOR`, `REPLICAOF`), `RANDOMKEY` (cannot be scoped),
+  Lua/function commands (`EVAL`/`EVALSHA`/`FCALL`) whose caller-supplied key list would bypass prefixing,
+  and legacy readers like `SUBSTR`. Non-RESP (inline) requests are denied for the same reason.
+
+### Known limitations
+
+- **RESP3 (`HELLO 3`)**: once a client negotiates RESP3, response-side prefix stripping is disabled for
+  that session (fail-safe — the prefix may show through on a `KEYS` reply, but no value is ever
+  corrupted). Requests are still fully prefixed/scoped/denied, so isolation holds.
+- **Transactions**: keys inside `MULTI`/`EXEC` are prefixed and scoped on the request side, but the
+  `EXEC` result array is not un-prefixed, so a `KEYS`/`SCAN` executed inside a transaction returns
+  prefixed names (cosmetic; still in-namespace).
+- **Pub/sub channels** are forwarded unchanged — channel isolation is out of scope; only keys are namespaced.

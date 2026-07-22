@@ -114,6 +114,9 @@ export const KEY_POSITIONS: Record<string, KeyPattern> = {
 	zpopmin: [0],
 	zpopmax: [0],
 	zrandmember: [0],
+	// KEYS' single argument is a glob pattern, not a stored key, but prefixing it is exactly what scopes
+	// the scan to the tenant namespace (`KEYS *` -> `KEYS <prefix>*`). Its reply is stripped like SCAN's.
+	keys: [0],
 	zrangestore: [0, 1],
 	bitfield_ro: [0],
 	xadd: [0],
@@ -199,3 +202,69 @@ export const KEY_RESOLVERS: Record<string, VariadicSpec> = {
 };
 
 export const KEY_COMMANDS = [...Object.keys(KEY_POSITIONS), ...Object.keys(KEY_RESOLVERS)];
+
+/**
+ * Isolation is enforced as **default-deny**: a command is forwarded to the shared service only if it is a
+ * known key command (prefixed), the pattern-scoped `SCAN`, or one of these keyless commands that do not
+ * cross the tenant key boundary. Everything else — unknown commands and administrative / global ones
+ * (`FLUSHALL`, `SWAPDB`, `CONFIG`, `SHUTDOWN`, `DEBUG`, `RANDOMKEY`, `EVAL`, `SUBSTR`, …) — is denied.
+ *
+ * Extend this set (not the deny path) to permit an additional keyless command.
+ *
+ * NOTE: pub/sub **channel** names are forwarded unchanged — channel isolation is a separate concern from
+ * key isolation and is intentionally out of scope here.
+ */
+export const PASSTHROUGH_COMMANDS = new Set<string>([
+	// connection / handshake / introspection
+	'ping',
+	'echo',
+	'hello',
+	'auth',
+	'select',
+	'quit',
+	'reset',
+	'command',
+	'info',
+	'client',
+	'lolwut',
+	'time',
+	'wait',
+	'waitaof',
+	// transactions (each queued command is still prefixed/denied on its own frame)
+	'multi',
+	'exec',
+	'discard',
+	'unwatch',
+	// pub/sub (channels are NOT namespaced — see note above)
+	'subscribe',
+	'unsubscribe',
+	'psubscribe',
+	'punsubscribe',
+	'ssubscribe',
+	'sunsubscribe',
+	'publish',
+	'spublish',
+	'pubsub',
+]);
+
+/** Commands whose reply carries stored keys that must be un-prefixed on the way back to the client. */
+export const KEY_RETURNING_COMMANDS = new Set<string>(['keys', 'scan']);
+
+/**
+ * Once a session issues one of these, the server may emit unsolicited/unordered frames (pub/sub messages),
+ * so request→reply correlation can no longer be trusted and response stripping is disabled (fail-safe).
+ */
+export const SUBSCRIBE_COMMANDS = new Set<string>(['subscribe', 'psubscribe', 'ssubscribe']);
+
+/**
+ * `SCAN` needs its `MATCH` pattern scoped to the tenant prefix (injected when the client omits it); unlike
+ * `KEYS` it has no fixed key position, so it is transformed by a dedicated builder.
+ */
+export const SCAN_COMMAND = 'scan';
+
+/**
+ * A denied command is rewritten to a frame whose command name is this sentinel, so the shared service
+ * answers with a clear `unknown command` error — preserving one-reply-per-command ordering without ever
+ * executing the forbidden command.
+ */
+export const DENIED_COMMAND_SENTINEL = '__proxima_command_denied__';

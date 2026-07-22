@@ -5,16 +5,16 @@ import type { IntegrationEnvironment, TenantHandle } from '../src/environment.ts
 import { EMPTY_ARRAY_FRAME, respCommand, sendRaw } from '../src/resp-raw.ts';
 
 /**
- * KNOWN-BUG EDGE CASES — these assert the CORRECT behavior and are EXPECTED TO FAIL against the
- * current implementation. Each maps to a finding in REVIEW-second-pass-2026-07-21.md. They are not
- * papered over (no skip / no todo): a red result here is the whole point — it proves the suite has
- * real diagnostic power. When the underlying bug is fixed, the corresponding test turns green.
+ * REGRESSION GUARDS — these assert the CORRECT behavior for three correctness bugs that have since been
+ * fixed (frame reassembly, empty-array pipeline handling, correlated response stripping). Each maps to a
+ * finding in REVIEW-second-pass-2026-07-21.md and is EXPECTED TO PASS; a red result here means the fix
+ * has regressed.
  *
- *   - big value spanning TCP segments      -> Finding #1 (no frame reassembly; key forwarded unprefixed)
- *   - pipeline poisoned by an empty array  -> Finding #2 (a null parse aborts prefixing for the rest)
- *   - value whose bytes start with prefix  -> Finding #3 (blind response stripping corrupts values)
+ *   - big value spanning TCP segments      -> Finding #1 (frame reassembly; key stays prefixed)
+ *   - pipeline poisoned by an empty array  -> Finding #2 (a *0 frame no longer aborts prefixing)
+ *   - value whose bytes start with prefix  -> Finding #3 (correlated stripping leaves values intact)
  */
-describe('known-bug edge cases (expected to fail until fixed)', () => {
+describe('regression guards for previously-fixed correctness bugs', () => {
 	let env: IntegrationEnvironment;
 	let tenant: TenantHandle;
 

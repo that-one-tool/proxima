@@ -1,27 +1,24 @@
 import type { SessionState } from '@that-one-tool/proxima-core';
-import { KEY_POSITIONS, KEY_RESOLVERS, KeyPattern, RESP, RESP_SPLIT, RESP_U8, VariadicSpec } from './resp-constants';
+import {
+	DENIED_COMMAND_SENTINEL,
+	KEY_POSITIONS,
+	KEY_RESOLVERS,
+	KEY_RETURNING_COMMANDS,
+	KeyPattern,
+	PASSTHROUGH_COMMANDS,
+	RESP,
+	RESP_SPLIT,
+	RESP_U8,
+	SCAN_COMMAND,
+	SUBSCRIBE_COMMANDS,
+	VariadicSpec,
+} from './resp-constants';
 
 const CRLF = Buffer.from(RESP_SPLIT, 'latin1');
 const EMPTY_BUFFER = Buffer.alloc(0);
-
-/**
- * Commands whose reply *is* (or contains) keys, so the tenant prefix must be stripped on the way
- * back to the client. Every other command returns values / members / metadata, which must pass
- * through untouched — stripping them is the over-stripping corruption bug (finding #3).
- *   - `keys`      → a flat array of matching keys
- *   - `randomkey` → a single bulk key (or a null bulk)
- *   - `scan`      → `[cursor, [keys…]]`; the numeric cursor never matches the prefix, so a blind
- *                   strip of the reply only rewrites the key elements
- */
-const KEY_RETURNING_COMMANDS = new Set(['keys', 'randomkey', 'scan']);
-
-/**
- * Once a session issues one of these, the server may emit *unsolicited* frames (pub/sub messages),
- * so request→reply order can no longer be trusted for correlation. Stripping is disabled for the
- * rest of the session (fail-safe: the prefix may show through on a `KEYS`, but no value is ever
- * corrupted).
- */
-const CORRELATION_BREAKING_COMMANDS = new Set(['subscribe', 'psubscribe', 'ssubscribe']);
+const MATCH_KEYWORD = 'match';
+const MATCH_KEYWORD_LITERAL = 'MATCH';
+const SCAN_MATCH_ALL = '*';
 
 const RESP_SESSION_KEY = '__respSession';
 
@@ -35,6 +32,21 @@ interface RespSessionContext {
 	/** Set once request→reply order can no longer be trusted; the stripper then passes everything through. */
 	correlationLost: boolean;
 }
+
+/** How a single request command frame is classified under the default-deny isolation policy. */
+type CommandClass = 'scan' | 'prefix' | 'passthrough' | 'deny';
+
+/** The correlation signal a consumed request command contributes to the shared reply queue. */
+interface CommandSignal {
+	/** `false` only for an empty (`*0`) / null (`*-1`) array, which draws no reply. */
+	drawsReply: boolean;
+	/** The reply to this command carries keys that must be un-prefixed. */
+	keyReturning: boolean;
+	/** After this command, request→reply order can no longer be trusted (subscribe, RESP3, CLIENT REPLY). */
+	breaksCorrelation: boolean;
+}
+
+const NO_REPLY_SIGNAL: CommandSignal = { drawsReply: false, keyReturning: false, breaksCorrelation: false };
 
 function getRespContext(session: SessionState): RespSessionContext {
 	const existing = session[RESP_SESSION_KEY] as RespSessionContext | undefined;
@@ -52,21 +64,20 @@ function loseCorrelation(context: RespSessionContext): void {
 	context.pending.length = 0;
 }
 
-/** Queue one reply-expectation per issued command; a subscribe (or lost correlation) disables stripping. */
-function recordCommands(context: RespSessionContext, commands: (string | null)[]): void {
+/** Queue one reply-expectation per issued command; a correlation-breaker disables stripping. */
+function recordCommands(context: RespSessionContext, signals: CommandSignal[]): void {
 	if (context.correlationLost) {
 		return;
 	}
-	for (const command of commands) {
-		if (command === null) {
-			// Empty (`*0`) / null (`*-1`) arrays are ignored by Redis and draw no reply — nothing to await.
-			continue;
-		}
-		if (CORRELATION_BREAKING_COMMANDS.has(command)) {
+	for (const signal of signals) {
+		if (signal.breaksCorrelation) {
 			loseCorrelation(context);
 			return;
 		}
-		context.pending.push(KEY_RETURNING_COMMANDS.has(command));
+		if (!signal.drawsReply) {
+			continue;
+		}
+		context.pending.push(signal.keyReturning);
 	}
 }
 
@@ -113,33 +124,37 @@ interface WalkResult {
 
 /**
  * Request-side walk result. Extends {@link WalkResult} with the correlation signal:
- * `commands` lists one lowercased command name per consumed complete command frame (`null` for an
- * empty/null array, which draws no reply), and `inline` marks that the walk stopped at non-RESP
- * bytes it could not frame.
+ * `signals` lists one entry per consumed complete command frame, and `inline` marks that the walk
+ * stopped at non-RESP bytes it could not frame.
  */
 interface PrefixWalkResult extends WalkResult {
-	commands: (string | null)[];
+	signals: CommandSignal[];
 	inline: boolean;
 }
 
-/** A complete command frame: its rebuilt bytes, the offset just past it, and its command name (`null` for `*0`/`*-1`). */
+/** A complete command frame: its rebuilt bytes, the offset just past it, and its correlation signal. */
 interface CommandFrame {
 	bytes: Buffer;
 	next: number;
-	command: string | null;
+	signal: CommandSignal;
 }
 
 /** A stateful, per-session transform over one direction of a proxied connection. */
 export type SessionTransformer = (data: Buffer, mapping: string) => Buffer;
 
+const DENIED_SENTINEL_BULK = encodeBulk(Buffer.from(DENIED_COMMAND_SENTINEL, 'latin1'));
+const ARRAY_HEADER_TWO = Buffer.from(`${RESP.ARRAY}2${RESP_SPLIT}`, 'latin1');
+// Non-RESP (inline) request bytes cannot be safely prefixed, so they must not reach the shared service.
+// Deny the whole thing: the client gets an unknown-command error and correlation is dropped (fail-safe).
+const INLINE_DENIED_FRAME = Buffer.concat([ARRAY_HEADER_TWO, DENIED_SENTINEL_BULK, encodeBulk(Buffer.from('inline', 'latin1'))]);
+
 /**
- * Prefixes the key arguments of every RESP command frame in the buffer.
- * The buffer may hold several coalesced commands; each is parsed by its declared
- * `*N` element count and `$<len>` byte lengths, so binary-safe values round-trip losslessly.
+ * Prefixes/scopes/denies the RESP command frames in the buffer according to the default-deny isolation
+ * policy. The buffer may hold several coalesced commands; each is parsed by its declared `*N` element
+ * count and `$<len>` byte lengths, so binary-safe values round-trip losslessly.
  *
- * This is the stateless view: an incomplete trailing frame is forwarded verbatim.
- * For live socket traffic use {@link createKeyPrefixer}, which reassembles frames
- * split across TCP reads instead of forwarding their unprefixed remainder.
+ * This is the stateless view (no correlation, no inline denial): an incomplete trailing frame is
+ * forwarded verbatim. For live socket traffic use {@link createKeyPrefixer}.
  */
 export function prefixRedisKeys(data: Buffer, keyPrefix: string): Buffer {
 	if (!data.length || !keyPrefix || data[0] !== RESP_U8.ARRAY) {
@@ -169,11 +184,12 @@ export function removePrefixFromRedisResponse(data: Buffer, keyPrefix: string): 
 }
 
 /**
- * Builds a stateful request-side transformer that prefixes keys across an arbitrary
- * TCP stream. It buffers any incomplete trailing command frame and reassembles it
- * with the next chunk, so fragmented or pipelined traffic never has its keys
- * forwarded unprefixed (fixes the tenant-isolation break on ordinary large/split traffic).
- * A fresh instance must be created per session so buffers never leak between clients.
+ * Builds a stateful request-side transformer that enforces tenant isolation across an arbitrary TCP
+ * stream. It prefixes the keys of known key commands, scopes `KEYS`/`SCAN` to the tenant prefix, and
+ * denies any command that cannot be safely prefixed (unknown or administrative) by rewriting it to a
+ * harmless unknown-command frame. Incomplete trailing frames are buffered and reassembled with the next
+ * chunk, so fragmented or pipelined traffic is never forwarded unprefixed. A fresh instance must be
+ * created per session so buffers never leak between clients.
  */
 export function createKeyPrefixer(session: SessionState): SessionTransformer {
 	let pending: Buffer = EMPTY_BUFFER;
@@ -190,16 +206,14 @@ export function createKeyPrefixer(session: SessionState): SessionTransformer {
 			return buffer;
 		}
 		if (buffer[0] !== RESP_U8.ARRAY) {
-			// Inline / non-RESP request bytes: we can no longer track command boundaries, so
-			// request→reply correlation is broken for the rest of the session (fail-safe: no stripping).
 			loseCorrelation(context);
 			pending = EMPTY_BUFFER;
-			return buffer;
+			return INLINE_DENIED_FRAME;
 		}
 
 		const prefix = Buffer.from(mapping, 'latin1');
-		const { output, consumed, commands, inline } = prefixCompleteCommands(buffer, prefix);
-		recordCommands(context, commands);
+		const { output, consumed, signals, inline } = prefixCompleteCommands(buffer, prefix);
+		recordCommands(context, signals);
 		if (inline) {
 			loseCorrelation(context);
 		}
@@ -208,18 +222,15 @@ export function createKeyPrefixer(session: SessionState): SessionTransformer {
 }
 
 /**
- * Builds a stateful response-side transformer. It reassembles fragmented replies before
- * stripping so a reply split across TCP reads is framed correctly rather than partially
- * mis-processed, and — crucially — it only un-prefixes replies to key-returning commands
- * (`KEYS`/`SCAN`/`RANDOMKEY`), correlated through the shared {@link SessionState} with the
- * request-side prefixer. This fixes the over-stripping corruption (finding #3): a stored
- * *value* whose bytes happen to begin with the tenant prefix is returned verbatim, because
- * the command that produced it (`GET`, `MGET`, …) is known not to return keys.
+ * Builds a stateful response-side transformer. It reassembles fragmented replies before stripping, and
+ * only un-prefixes replies to key-returning commands (`KEYS`/`SCAN`), correlated through the shared
+ * {@link SessionState} with the request-side prefixer, so a stored *value* whose bytes begin with the
+ * tenant prefix is returned verbatim.
  *
- * Correlation is fail-safe toward *not* stripping: if request→reply order can't be trusted
- * (an inline request, a pub/sub subscribe, or an unexpected extra reply), the stripper passes
- * everything through — the prefix may show through on a `KEYS`, but no value is ever corrupted.
- * A fresh instance must be created per session, sharing one {@link SessionState} with its
+ * Correlation is fail-safe toward *not* stripping: if request→reply order can't be trusted (an inline
+ * request, a pub/sub subscribe, a RESP3 aggregate reply, or an unexpected extra reply), stripping is
+ * disabled for the rest of the session — the prefix may show through on a `KEYS`, but no value is ever
+ * corrupted. A fresh instance must be created per session, sharing one {@link SessionState} with its
  * request-side sibling.
  */
 export function createResponseStripper(session: SessionState): SessionTransformer {
@@ -229,6 +240,11 @@ export function createResponseStripper(session: SessionState): SessionTransforme
 	return (data: Buffer, mapping: string): Buffer => {
 		if (!mapping) {
 			return data;
+		}
+		if (context.correlationLost) {
+			const flushed = pending.length ? Buffer.concat([pending, data]) : data;
+			pending = EMPTY_BUFFER;
+			return flushed;
 		}
 
 		const buffer = pending.length ? Buffer.concat([pending, data]) : data;
@@ -243,24 +259,41 @@ export function createResponseStripper(session: SessionState): SessionTransforme
 	};
 }
 
+/** The RESP2 reply type bytes the flat response scanner can frame. Anything else means RESP3 (see below). */
+function isKnownReplyType(firstByte: number): boolean {
+	return (
+		firstByte === RESP_U8.BULK ||
+		firstByte === RESP_U8.ARRAY ||
+		firstByte === RESP_U8.STRING ||
+		firstByte === RESP_U8.ERROR ||
+		firstByte === RESP_U8.INT
+	);
+}
+
 /**
- * Walks each fully-received top-level reply at the front of `buffer`. A reply is framed by its
- * declared lengths (binary-safe) and only rewritten when its correlated command returns keys;
- * otherwise its exact bytes are forwarded. An incomplete trailing reply is left unconsumed so it
- * can be reassembled with the next chunk. Exactly one correlation expectation is consumed per
- * complete reply, keeping the request/reply queue aligned.
+ * Walks each fully-received top-level reply at the front of `buffer`. A reply is framed by its declared
+ * lengths (binary-safe) and only rewritten when its correlated command returns keys; otherwise its exact
+ * bytes are forwarded. If a RESP3 aggregate type is encountered (only after the client negotiated
+ * `HELLO 3`, which itself already breaks correlation), the flat scanner cannot frame it, so correlation
+ * is dropped and the remainder is forwarded verbatim rather than risking a desync.
  */
 function stripCorrelatedReplies(data: Buffer, prefix: Buffer, context: RespSessionContext): WalkResult {
 	const output: Buffer[] = [];
 	let offset = 0;
 
 	while (offset < data.length) {
+		if (!isKnownReplyType(data[offset])) {
+			loseCorrelation(context);
+			output.push(data.subarray(offset));
+			offset = data.length;
+			break;
+		}
+
 		const stripped: Buffer[] = [];
 		const next = stripValue(data, offset, prefix, stripped);
 		if (next === null) {
 			break;
 		}
-		// The reply is complete: consume its expectation and choose stripped vs. verbatim bytes.
 		output.push(shouldStripReply(context) ? concatOrEmpty(stripped) : data.subarray(offset, next));
 		offset = next;
 	}
@@ -301,16 +334,16 @@ function isStrippableResponse(firstByte: number): boolean {
 }
 
 /**
- * Prefixes every complete command frame at the front of `data`, returning the rebuilt
- * bytes and the number of input bytes consumed. Behaviour on non-complete input:
+ * Transforms every complete command frame at the front of `data`, returning the rebuilt bytes and the
+ * number of input bytes consumed. Behaviour on non-complete input:
  *   - an incomplete trailing frame (declared bytes not all arrived) is left unconsumed;
- *   - an empty (`*0`) or null (`*-1`) array is a complete frame — forwarded verbatim and
- *     scanning continues (so a later pipelined command is still prefixed);
- *   - non-RESP / inline bytes at a frame boundary cannot be reframed and are handed back verbatim.
+ *   - an empty (`*0`) or null (`*-1`) array is a complete frame — forwarded verbatim and scanning
+ *     continues (so a later pipelined command is still handled);
+ *   - non-RESP / inline bytes at a frame boundary cannot be framed and stop the walk (`inline`).
  */
 function prefixCompleteCommands(data: Buffer, prefix: Buffer): PrefixWalkResult {
 	const output: Buffer[] = [];
-	const commands: (string | null)[] = [];
+	const signals: CommandSignal[] = [];
 	let offset = 0;
 	let inline = false;
 
@@ -328,11 +361,11 @@ function prefixCompleteCommands(data: Buffer, prefix: Buffer): PrefixWalkResult 
 		}
 
 		output.push(frame.bytes);
-		commands.push(frame.command);
+		signals.push(frame.signal);
 		offset = frame.next;
 	}
 
-	return { output: concatOrEmpty(output), consumed: offset, commands, inline };
+	return { output: concatOrEmpty(output), consumed: offset, signals, inline };
 }
 
 function takeCommandFrame(data: Buffer, offset: number, prefix: Buffer): CommandFrame | null {
@@ -341,7 +374,7 @@ function takeCommandFrame(data: Buffer, offset: number, prefix: Buffer): Command
 		return null;
 	}
 	if (header.count <= 0) {
-		return { bytes: data.subarray(offset, header.next), next: header.next, command: null };
+		return { bytes: data.subarray(offset, header.next), next: header.next, signal: NO_REPLY_SIGNAL };
 	}
 
 	const elements = readBulkElements(data, header.next, header.count);
@@ -349,11 +382,117 @@ function takeCommandFrame(data: Buffer, offset: number, prefix: Buffer): Command
 		return null;
 	}
 
+	const name = bulkValueAsString(data, elements[0]);
+	const kind = classifyCommand(name);
 	return {
-		bytes: buildPrefixedCommand(data, offset, elements, prefix),
+		bytes: transformCommand(kind, data, offset, elements, prefix),
 		next: elements[elements.length - 1].next,
-		command: bulkValueAsString(data, elements[0]),
+		signal: signalFor(kind, name, data, elements),
 	};
+}
+
+function classifyCommand(name: string): CommandClass {
+	if (name === SCAN_COMMAND) {
+		return 'scan';
+	}
+	if (isPrefixable(name)) {
+		return 'prefix';
+	}
+	if (PASSTHROUGH_COMMANDS.has(name)) {
+		return 'passthrough';
+	}
+	return 'deny';
+}
+
+function isPrefixable(name: string): boolean {
+	return name in KEY_POSITIONS || name in KEY_RESOLVERS;
+}
+
+function transformCommand(kind: CommandClass, data: Buffer, offset: number, elements: BulkToken[], prefix: Buffer): Buffer {
+	if (kind === 'scan') {
+		return buildScopedScan(data, elements, prefix);
+	}
+	if (kind === 'prefix') {
+		return buildPrefixedCommand(data, offset, elements, prefix);
+	}
+	if (kind === 'passthrough') {
+		return data.subarray(offset, elements[elements.length - 1].next);
+	}
+	return buildDeniedCommand(data, elements[0]);
+}
+
+function signalFor(kind: CommandClass, name: string, data: Buffer, elements: BulkToken[]): CommandSignal {
+	if (kind === 'scan') {
+		return { drawsReply: true, keyReturning: true, breaksCorrelation: false };
+	}
+	if (kind === 'prefix') {
+		return { drawsReply: true, keyReturning: KEY_RETURNING_COMMANDS.has(name), breaksCorrelation: false };
+	}
+	if (kind === 'passthrough') {
+		return { drawsReply: true, keyReturning: false, breaksCorrelation: breaksCorrelation(name, data, elements) };
+	}
+	// A denied command is rewritten to an unknown-command frame, which still draws one (error) reply.
+	return { drawsReply: true, keyReturning: false, breaksCorrelation: false };
+}
+
+/** A passthrough command that makes subsequent replies unorderable/unframeable relative to requests. */
+function breaksCorrelation(name: string, data: Buffer, elements: BulkToken[]): boolean {
+	if (SUBSCRIBE_COMMANDS.has(name)) {
+		return true;
+	}
+	if (name === 'hello') {
+		return anyArgEquals(data, elements, '3');
+	}
+	if (name === 'client') {
+		return elements.length > 1 && bulkValueAsString(data, elements[1]) === 'reply';
+	}
+	return false;
+}
+
+function anyArgEquals(data: Buffer, elements: BulkToken[], value: string): boolean {
+	for (let index = 1; index < elements.length; index++) {
+		if (bulkValueAsString(data, elements[index]) === value) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Rewrite a forbidden command to `[__proxima_command_denied__, <original name>]` so the service errors. */
+function buildDeniedCommand(data: Buffer, nameToken: BulkToken): Buffer {
+	const name = data.subarray(nameToken.valueStart, nameToken.valueEnd);
+	return Buffer.concat([ARRAY_HEADER_TWO, DENIED_SENTINEL_BULK, encodeBulk(name)]);
+}
+
+/**
+ * Rewrites `SCAN cursor [MATCH pattern] [COUNT n] [TYPE t]` so the match pattern is scoped to the tenant
+ * prefix, injecting `MATCH <prefix>*` when the client supplies no pattern. Without this a client `SCAN`
+ * would iterate the entire shared keyspace across all tenants.
+ */
+function buildScopedScan(data: Buffer, elements: BulkToken[], prefix: Buffer): Buffer {
+	const patternIndex = scanMatchPatternIndex(data, elements);
+	const chunks: Buffer[] = [];
+	for (let index = 0; index < elements.length; index++) {
+		chunks.push(index === patternIndex ? prefixedBulk(data, elements[index], prefix) : rawBulk(data, elements[index]));
+	}
+
+	let count = elements.length;
+	if (patternIndex < 0) {
+		chunks.push(encodeBulk(Buffer.from(MATCH_KEYWORD_LITERAL, 'latin1')));
+		chunks.push(encodeBulk(Buffer.concat([prefix, Buffer.from(SCAN_MATCH_ALL, 'latin1')])));
+		count += 2;
+	}
+
+	return Buffer.concat([Buffer.from(`${RESP.ARRAY}${count}${RESP_SPLIT}`, 'latin1'), ...chunks]);
+}
+
+function scanMatchPatternIndex(data: Buffer, elements: BulkToken[]): number {
+	for (let index = 1; index < elements.length - 1; index++) {
+		if (bulkValueAsString(data, elements[index]) === MATCH_KEYWORD) {
+			return index + 1;
+		}
+	}
+	return -1;
 }
 
 function readBulkElements(data: Buffer, offset: number, count: number): BulkToken[] | null {
@@ -379,8 +518,12 @@ function buildPrefixedCommand(data: Buffer, offset: number, elements: BulkToken[
 	return Buffer.concat(chunks);
 }
 
+// Always prefix a key argument (unless it is a null bulk). Idempotency shortcuts (skipping a key that
+// already starts with the prefix) are unsafe: they alias a client key `foo` with a client key
+// `<prefix>foo` onto the same physical key. The request side is the sole prefixer, so a key is prefixed
+// exactly once and un-prefixed exactly once on the way back.
 function maybePrefix(data: Buffer, token: BulkToken, isKey: boolean, prefix: Buffer): Buffer {
-	if (!isKey || token.isNull || startsWithPrefix(data, token, prefix)) {
+	if (!isKey || token.isNull) {
 		return rawBulk(data, token);
 	}
 	return prefixedBulk(data, token, prefix);

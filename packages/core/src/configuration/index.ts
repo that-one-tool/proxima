@@ -14,6 +14,7 @@ const DEFAULT_CONNECTION_CLEANUP_INTERVAL_MS = 30000;
 const DEFAULT_ACQUIRE_CONNECTION_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_LISTENING_PORT = 7000;
+const DEFAULT_CLIENT_IDLE_TIMEOUT_MS = 0;
 
 interface IntRange {
 	min?: number;
@@ -28,6 +29,8 @@ export interface Config {
 	tlsClientOptions: TlsServerClientOptions;
 	tlsServerOptions: TlsServerClientOptions;
 	trustedHttpPort: number;
+	/** Idle time (ms) before an inactive client connection is closed and its pooled connection released. 0 disables. */
+	clientIdleTimeoutMs: number;
 	version: string;
 }
 
@@ -41,6 +44,7 @@ export function getConfig(): Config {
 			tlsClientOptions: getTlsClientOptions(),
 			tlsServerOptions: getTlsServerOptions(),
 			trustedHttpPort: getEnvInt('TRUSTED_HTTP_PORT', DEFAULT_TRUSTED_HTTP_PORT, { min: MIN_PORT, max: MAX_PORT }),
+			clientIdleTimeoutMs: getEnvInt('CLIENT_IDLE_TIMEOUT_MS', DEFAULT_CLIENT_IDLE_TIMEOUT_MS, { min: 0 }),
 			version: process.env.VERSION || 'unknown',
 		};
 	} catch (error) {

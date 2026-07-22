@@ -36,6 +36,13 @@ describe('getConfig', () => {
 			expect(config.forwardServiceOptions.port).toBe(6379);
 			expect(config.forwardServiceOptions.minPoolConnections).toBe(5);
 			expect(config.forwardServiceOptions.maxPoolConnections).toBe(20);
+			expect(config.clientIdleTimeoutMs).toBe(0);
+		});
+
+		it('reads the client idle timeout when provided', () => {
+			process.env.CLIENT_IDLE_TIMEOUT_MS = '60000';
+
+			expect(getConfig().clientIdleTimeoutMs).toBe(60000);
 		});
 
 		it('defaults rejectUnauthorized to true (secure-by-default)', () => {

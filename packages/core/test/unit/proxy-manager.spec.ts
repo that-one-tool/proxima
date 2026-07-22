@@ -48,9 +48,12 @@ import { LeasedConnection } from '../../src/connection-pool/leased-connection';
 
 class FakeSocket extends EventEmitter {
 	remoteAddress = '10.0.0.1';
-	write = jest.fn();
+	write = jest.fn(() => true);
 	end = jest.fn();
 	destroy = jest.fn();
+	pause = jest.fn();
+	resume = jest.fn();
+	setTimeout = jest.fn();
 }
 
 function makeConfig(overrides: Record<string, unknown> = {}): any {
@@ -190,6 +193,59 @@ describe('ProxyManager data forwarding', () => {
 		client.emit('data', payload);
 
 		expect(serviceSocket.write).toHaveBeenCalledWith(payload);
+	});
+});
+
+describe('ProxyManager backpressure (M5)', () => {
+	it('pauses the client when the service write buffer is full and resumes on drain', async () => {
+		const config = makeConfig();
+		const manager = new ProxyManager(config);
+		const pool = poolInstances[0];
+		const serviceSocket = new FakeSocket();
+		primePool(pool, serviceSocket);
+
+		const client = new FakeSocket();
+		await listen(manager, config, client);
+
+		serviceSocket.write.mockReturnValue(false); // destination buffer is full
+		client.emit('data', Buffer.from('ping'));
+		expect(client.pause).toHaveBeenCalledTimes(1);
+		expect(client.resume).not.toHaveBeenCalled();
+
+		serviceSocket.emit('drain');
+		expect(client.resume).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('ProxyManager client idle timeout (M6)', () => {
+	it('closes an idle client after the configured timeout and releases the pooled connection', async () => {
+		const config = makeConfig({ clientIdleTimeoutMs: 1000 });
+		const manager = new ProxyManager(config);
+		const pool = poolInstances[0];
+		const serviceSocket = new FakeSocket();
+		primePool(pool, serviceSocket);
+
+		const client = new FakeSocket();
+		await listen(manager, config, client);
+
+		expect(client.setTimeout).toHaveBeenCalledWith(1000, expect.any(Function));
+		const onTimeout = client.setTimeout.mock.calls[0][1] as () => void;
+		onTimeout();
+
+		expect(client.end).toHaveBeenCalled();
+		expect(pool.releaseConnection).toHaveBeenCalledWith('C-1', 7);
+	});
+
+	it('does not arm a timeout when the idle timeout is disabled (0)', async () => {
+		const config = makeConfig();
+		const manager = new ProxyManager(config);
+		const pool = poolInstances[0];
+		primePool(pool, new FakeSocket());
+
+		const client = new FakeSocket();
+		await listen(manager, config, client);
+
+		expect(client.setTimeout).not.toHaveBeenCalled();
 	});
 });
 
