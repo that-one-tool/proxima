@@ -45,6 +45,7 @@ jest.mock('../../src/servers/tcp-tls-server-builder', () => {
 
 import { ProxyManager } from '../../src/proxy-manager';
 import { LeasedConnection } from '../../src/connection-pool/leased-connection';
+import { RECYCLE_UNSAFE_KEY } from '../../src/types';
 
 class FakeSocket extends EventEmitter {
 	remoteAddress = '10.0.0.1';
@@ -246,6 +247,40 @@ describe('ProxyManager client idle timeout (M6)', () => {
 		await listen(manager, config, client);
 
 		expect(client.setTimeout).not.toHaveBeenCalled();
+	});
+});
+
+describe('ProxyManager destroy-on-dirty recycling (connection-state leak)', () => {
+	it('destroys the pooled connection when the session left connection-scoped state', async () => {
+		const config = makeConfig();
+		const manager = new ProxyManager(config);
+		const pool = poolInstances[0];
+		primePool(pool, new FakeSocket());
+		manager.setFromClientTransformer((session: any) => {
+			session[RECYCLE_UNSAFE_KEY] = true; // e.g. the client ran SELECT / SUBSCRIBE / left a MULTI open
+			return (data: Buffer) => data;
+		});
+
+		const client = new FakeSocket();
+		await listen(manager, config, client);
+		client.emit('close');
+
+		expect(pool.closeConnection).toHaveBeenCalledWith('C-1', 7);
+		expect(pool.releaseConnection).not.toHaveBeenCalled();
+	});
+
+	it('recycles (releases) the pooled connection for a clean session', async () => {
+		const config = makeConfig();
+		const manager = new ProxyManager(config);
+		const pool = poolInstances[0];
+		primePool(pool, new FakeSocket());
+
+		const client = new FakeSocket();
+		await listen(manager, config, client);
+		client.emit('close');
+
+		expect(pool.releaseConnection).toHaveBeenCalledWith('C-1', 7);
+		expect(pool.closeConnection).not.toHaveBeenCalled();
 	});
 });
 

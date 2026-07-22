@@ -20,6 +20,9 @@ export interface ProximaOptions {
 	httpPort: number;
 	tenants: TenantMapping[];
 	ipWhitelist?: string;
+	/** Force the upstream pool size (both set to 1 makes connection reuse across sessions deterministic). */
+	minPoolConnections?: number;
+	maxPoolConnections?: number;
 }
 
 export interface StartedProxima {
@@ -49,7 +52,7 @@ export async function startProxima(options: ProximaOptions): Promise<StartedProx
 
 function buildEnv(options: ProximaOptions): NodeJS.ProcessEnv {
 	const portMapping = options.tenants.map((tenant) => `${tenant.port}:${tenant.prefix}`).join(',');
-	return {
+	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		PORT_MAPPING: portMapping,
 		FORWARD_SERVICE_HOST: options.forwardHost,
@@ -57,6 +60,13 @@ function buildEnv(options: ProximaOptions): NodeJS.ProcessEnv {
 		IP_WHITELIST: options.ipWhitelist ?? '*.*.*.*',
 		TRUSTED_HTTP_PORT: String(options.httpPort),
 	};
+	if (options.minPoolConnections !== undefined) {
+		env.FORWARD_SERVICE_MIN_POOL_CONNECTIONS = String(options.minPoolConnections);
+	}
+	if (options.maxPoolConnections !== undefined) {
+		env.FORWARD_SERVICE_MAX_POOL_CONNECTIONS = String(options.maxPoolConnections);
+	}
+	return env;
 }
 
 function waitForReady(child: ChildProcess, tenants: TenantMapping[], logs: string[]): Promise<void> {

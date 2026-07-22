@@ -17,6 +17,15 @@ export type TransformerFunction = Optional<(data: Buffer, mapping: string) => Bu
 export type SessionState = Record<string, unknown>;
 
 /**
+ * SessionState flag a transformer sets truthy once the session has left connection-scoped state on the
+ * pooled socket that must not leak to the next tenant — e.g. `SELECT`, `AUTH`, `HELLO 3`, `SUBSCRIBE`,
+ * an open `MULTI`/`WATCH`, or `CLIENT REPLY`/`CLIENT TRACKING`. When set, the proxy destroys the pooled
+ * connection on release instead of recycling it, so a sanitized (fresh) connection serves the next
+ * client. The core treats the value as opaque apart from this strict-equality check.
+ */
+export const RECYCLE_UNSAFE_KEY = '__proximaRecycleUnsafe';
+
+/**
  * Produces a fresh {@link TransformerFunction} for a single client session, given that session's
  * shared {@link SessionState}. A factory (rather than a shared function) is required so that any
  * per-session state — such as a RESP reassembly buffer — is isolated between connections and

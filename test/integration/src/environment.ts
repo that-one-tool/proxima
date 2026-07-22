@@ -22,12 +22,21 @@ export interface IntegrationEnvironment {
 	stop(): Promise<void>;
 }
 
+export interface EnvironmentOptions {
+	/** Force the upstream pool size. Set both to 1 to make connection reuse across sessions deterministic. */
+	minPoolConnections?: number;
+	maxPoolConnections?: number;
+}
+
 /**
  * Brings up the full stack: a real Redis container, one spawned Proxima process listening on a
  * dedicated port per tenant, an ioredis client per tenant through the proxy, and a direct client
  * to Redis for verification. `prefixes` maps a tenant name to its key prefix (include the colon).
  */
-export async function startEnvironment(prefixes: Record<string, string>): Promise<IntegrationEnvironment> {
+export async function startEnvironment(
+	prefixes: Record<string, string>,
+	options: EnvironmentOptions = {},
+): Promise<IntegrationEnvironment> {
 	const redis = await startRedis();
 	const plans = await planTenants(prefixes);
 	const httpPort = await getFreePort();
@@ -37,6 +46,8 @@ export async function startEnvironment(prefixes: Record<string, string>): Promis
 		forwardPort: redis.port,
 		httpPort,
 		tenants: plans.map(({ port, prefix }) => ({ port, prefix })),
+		minPoolConnections: options.minPoolConnections,
+		maxPoolConnections: options.maxPoolConnections,
 	});
 
 	const tenants = connectTenants(plans);

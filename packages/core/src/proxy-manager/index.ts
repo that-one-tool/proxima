@@ -7,7 +7,7 @@ import { LeasedConnection } from '../connection-pool/leased-connection';
 import { ContextualError } from '../errors';
 import { Logger } from '../logging';
 import { ServerBuilder } from '../servers/tcp-tls-server-builder';
-import { SessionState, TransformerFactory, TransformerFunction } from '../types';
+import { RECYCLE_UNSAFE_KEY, SessionState, TransformerFactory, TransformerFunction } from '../types';
 
 const ALLOW_ALL_IPS = '*.*.*.*';
 
@@ -222,12 +222,16 @@ export class ProxyManager extends EventEmitter {
 		this.pipe(service, clientSocket, toClientTransformer, mapping, requestId);
 
 		let ended = false;
-		const endSession = (destroy: boolean): void => {
+		const endSession = (forceDestroy: boolean): void => {
 			if (ended) {
 				return;
 			}
 			ended = true;
 			// The pool strips the lease's service-side listeners on release/close — no manual teardown here.
+			// A session that left connection-scoped state on the socket (SELECT, AUTH, HELLO 3, SUBSCRIBE,
+			// an open MULTI/WATCH, CLIENT REPLY/TRACKING) must not be recycled to another tenant, so it is
+			// destroyed rather than returned to the pool.
+			const destroy = forceDestroy || session[RECYCLE_UNSAFE_KEY] === true;
 			this.releaseOrClose(connectionId, leaseId, destroy);
 		};
 

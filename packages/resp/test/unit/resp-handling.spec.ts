@@ -1,3 +1,4 @@
+import { RECYCLE_UNSAFE_KEY } from '@that-one-tool/proxima-core';
 import { createKeyPrefixer, createResponseStripper, prefixRedisKeys, removePrefixFromRedisResponse, SessionTransformer } from '../../src/resp-handling';
 import { KEY_COMMANDS } from '../../src/resp-constants';
 
@@ -796,5 +797,67 @@ describe('H2 — RESP3 aggregate replies do not desync correlation', () => {
 		// A push/map arriving where the flat scanner expects a RESP2 reply must not be mis-framed.
 		const push = Buffer.concat([Buffer.from('>2\r\n'), bulk(Buffer.from('message')), bulk(Buffer.from('test:payload'))]);
 		expect(response(push, prefix)).toEqual(push);
+	});
+});
+
+describe('connection-state recycling safety (destroy-on-dirty)', () => {
+	const prefix = 'test:';
+
+	/** Run a sequence of commands through a fresh request transformer and report the recycle-unsafe flag. */
+	function isDirtyAfter(commands: Buffer[]): boolean {
+		const session: Record<string, unknown> = {};
+		const request = createKeyPrefixer(session);
+		for (const cmd of commands) {
+			request(cmd, prefix);
+		}
+		return session[RECYCLE_UNSAFE_KEY] === true;
+	}
+
+	it('a plain key-command session stays recyclable', () => {
+		expect(isDirtyAfter([command('SET', 'k', 'v'), command('GET', 'k'), command('KEYS', '*')])).toBe(false);
+	});
+
+	it('SELECT to a non-zero DB marks the session unsafe, but SELECT 0 does not', () => {
+		expect(isDirtyAfter([command('SELECT', '5')])).toBe(true);
+		expect(isDirtyAfter([command('SELECT', '0')])).toBe(false);
+	});
+
+	it('AUTH marks the session unsafe', () => {
+		expect(isDirtyAfter([command('AUTH', 'user', 'pass')])).toBe(true);
+	});
+
+	it('HELLO 3 marks the session unsafe, HELLO 2 does not', () => {
+		expect(isDirtyAfter([command('HELLO', '3')])).toBe(true);
+		expect(isDirtyAfter([command('HELLO', '2')])).toBe(false);
+	});
+
+	it('SUBSCRIBE marks the session unsafe', () => {
+		expect(isDirtyAfter([command('SUBSCRIBE', 'ch')])).toBe(true);
+	});
+
+	it('CLIENT REPLY / TRACKING mark the session unsafe, CLIENT SETNAME stays recyclable', () => {
+		expect(isDirtyAfter([command('CLIENT', 'REPLY', 'OFF')])).toBe(true);
+		expect(isDirtyAfter([command('CLIENT', 'TRACKING', 'ON')])).toBe(true);
+		expect(isDirtyAfter([command('CLIENT', 'SETNAME', 'app')])).toBe(false);
+	});
+
+	it('a balanced MULTI/EXEC stays recyclable, but an open MULTI does not', () => {
+		expect(isDirtyAfter([command('MULTI'), command('SET', 'k', 'v'), command('EXEC')])).toBe(false);
+		expect(isDirtyAfter([command('MULTI'), command('DISCARD')])).toBe(false);
+		expect(isDirtyAfter([command('MULTI'), command('SET', 'k', 'v')])).toBe(true);
+	});
+
+	it('a dangling WATCH marks the session unsafe; UNWATCH or EXEC clears it', () => {
+		expect(isDirtyAfter([command('WATCH', 'k')])).toBe(true);
+		expect(isDirtyAfter([command('WATCH', 'k'), command('UNWATCH')])).toBe(false);
+		expect(isDirtyAfter([command('WATCH', 'k'), command('MULTI'), command('EXEC')])).toBe(false);
+	});
+
+	it('RESET clears prior dirty state', () => {
+		expect(isDirtyAfter([command('SELECT', '5'), command('RESET')])).toBe(false);
+	});
+
+	it('a denied command does not dirty the session (it never executes)', () => {
+		expect(isDirtyAfter([command('FLUSHALL')])).toBe(false);
 	});
 });

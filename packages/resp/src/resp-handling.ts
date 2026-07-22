@@ -1,4 +1,4 @@
-import type { SessionState } from '@that-one-tool/proxima-core';
+import { RECYCLE_UNSAFE_KEY, type SessionState } from '@that-one-tool/proxima-core';
 import {
 	DENIED_COMMAND_SENTINEL,
 	KEY_POSITIONS,
@@ -31,7 +31,20 @@ interface RespSessionContext {
 	pending: boolean[];
 	/** Set once request→reply order can no longer be trusted; the stripper then passes everything through. */
 	correlationLost: boolean;
+	/** A permanently connection-mutating command ran (SELECT n≠0, AUTH, HELLO 3, SUBSCRIBE, CLIENT REPLY/TRACKING). */
+	latchedDirty: boolean;
+	/** A MULTI without a closing EXEC/DISCARD/RESET — the socket carries an open transaction. */
+	openMulti: boolean;
+	/** A WATCH without a closing UNWATCH/EXEC/DISCARD/RESET — the socket carries watched keys. */
+	watching: boolean;
 }
+
+/**
+ * How a request command changes the *connection's* own state on the pooled socket. Used to decide whether
+ * the socket can be safely recycled to another tenant on release, or must be destroyed (see
+ * {@link RECYCLE_UNSAFE_KEY}). Orthogonal to key prefixing and reply correlation.
+ */
+type StateEffect = 'none' | 'latchDirty' | 'multiOpen' | 'txnClose' | 'watchOpen' | 'watchClose' | 'reset';
 
 /** How a single request command frame is classified under the default-deny isolation policy. */
 type CommandClass = 'scan' | 'prefix' | 'passthrough' | 'deny';
@@ -53,7 +66,7 @@ function getRespContext(session: SessionState): RespSessionContext {
 	if (existing) {
 		return existing;
 	}
-	const created: RespSessionContext = { pending: [], correlationLost: false };
+	const created: RespSessionContext = { pending: [], correlationLost: false, latchedDirty: false, openMulti: false, watching: false };
 	session[RESP_SESSION_KEY] = created;
 	return created;
 }
@@ -129,14 +142,16 @@ interface WalkResult {
  */
 interface PrefixWalkResult extends WalkResult {
 	signals: CommandSignal[];
+	stateEffects: StateEffect[];
 	inline: boolean;
 }
 
-/** A complete command frame: its rebuilt bytes, the offset just past it, and its correlation signal. */
+/** A complete command frame: its rebuilt bytes, the offset just past it, its correlation signal and state effect. */
 interface CommandFrame {
 	bytes: Buffer;
 	next: number;
 	signal: CommandSignal;
+	stateEffect: StateEffect;
 }
 
 /** A stateful, per-session transform over one direction of a proxied connection. */
@@ -212,8 +227,12 @@ export function createKeyPrefixer(session: SessionState): SessionTransformer {
 		}
 
 		const prefix = Buffer.from(mapping, 'latin1');
-		const { output, consumed, signals, inline } = prefixCompleteCommands(buffer, prefix);
+		const { output, consumed, signals, stateEffects, inline } = prefixCompleteCommands(buffer, prefix);
 		recordCommands(context, signals);
+		for (const effect of stateEffects) {
+			applyStateEffect(context, effect);
+		}
+		session[RECYCLE_UNSAFE_KEY] = isSessionDirty(context);
 		if (inline) {
 			loseCorrelation(context);
 		}
@@ -344,6 +363,7 @@ function isStrippableResponse(firstByte: number): boolean {
 function prefixCompleteCommands(data: Buffer, prefix: Buffer): PrefixWalkResult {
 	const output: Buffer[] = [];
 	const signals: CommandSignal[] = [];
+	const stateEffects: StateEffect[] = [];
 	let offset = 0;
 	let inline = false;
 
@@ -362,10 +382,11 @@ function prefixCompleteCommands(data: Buffer, prefix: Buffer): PrefixWalkResult 
 
 		output.push(frame.bytes);
 		signals.push(frame.signal);
+		stateEffects.push(frame.stateEffect);
 		offset = frame.next;
 	}
 
-	return { output: concatOrEmpty(output), consumed: offset, signals, inline };
+	return { output: concatOrEmpty(output), consumed: offset, signals, stateEffects, inline };
 }
 
 function takeCommandFrame(data: Buffer, offset: number, prefix: Buffer): CommandFrame | null {
@@ -374,7 +395,7 @@ function takeCommandFrame(data: Buffer, offset: number, prefix: Buffer): Command
 		return null;
 	}
 	if (header.count <= 0) {
-		return { bytes: data.subarray(offset, header.next), next: header.next, signal: NO_REPLY_SIGNAL };
+		return { bytes: data.subarray(offset, header.next), next: header.next, signal: NO_REPLY_SIGNAL, stateEffect: 'none' };
 	}
 
 	const elements = readBulkElements(data, header.next, header.count);
@@ -388,6 +409,8 @@ function takeCommandFrame(data: Buffer, offset: number, prefix: Buffer): Command
 		bytes: transformCommand(kind, data, offset, elements, prefix),
 		next: elements[elements.length - 1].next,
 		signal: signalFor(kind, name, data, elements),
+		// A denied command is rewritten to an unknown-command frame, so it never executes and changes no state.
+		stateEffect: kind === 'deny' ? 'none' : computeStateEffect(name, data, elements),
 	};
 }
 
@@ -456,6 +479,82 @@ function anyArgEquals(data: Buffer, elements: BulkToken[], value: string): boole
 		}
 	}
 	return false;
+}
+
+// CLIENT subcommands that change connection state the next tenant would inherit (reply suppression,
+// key-invalidation tracking). CLIENT SETNAME/SETINFO/GETNAME/ID/… are cosmetic and stay recyclable.
+const DIRTY_CLIENT_SUBCOMMANDS = new Set(['reply', 'tracking']);
+
+// Commands whose connection-state effect is fixed regardless of arguments.
+const FIXED_STATE_EFFECTS: Record<string, StateEffect> = {
+	auth: 'latchDirty',
+	subscribe: 'latchDirty',
+	psubscribe: 'latchDirty',
+	ssubscribe: 'latchDirty',
+	multi: 'multiOpen',
+	exec: 'txnClose',
+	discard: 'txnClose',
+	reset: 'reset',
+	watch: 'watchOpen',
+	unwatch: 'watchClose',
+};
+
+/** How a command changes the pooled socket's connection state (auth / DB / RESP version / subscribe / txn). */
+function computeStateEffect(name: string, data: Buffer, elements: BulkToken[]): StateEffect {
+	if (name === 'hello') {
+		return anyArgEquals(data, elements, '3') || anyArgEquals(data, elements, 'auth') ? 'latchDirty' : 'none';
+	}
+	if (name === 'select') {
+		return isNonZeroSelect(data, elements) ? 'latchDirty' : 'none';
+	}
+	if (name === 'client') {
+		return isDirtyClientSubcommand(data, elements) ? 'latchDirty' : 'none';
+	}
+	return FIXED_STATE_EFFECTS[name] ?? 'none';
+}
+
+function isNonZeroSelect(data: Buffer, elements: BulkToken[]): boolean {
+	return elements.length > 1 && bulkValueAsString(data, elements[1]) !== '0';
+}
+
+function isDirtyClientSubcommand(data: Buffer, elements: BulkToken[]): boolean {
+	return elements.length > 1 && DIRTY_CLIENT_SUBCOMMANDS.has(bulkValueAsString(data, elements[1]));
+}
+
+/** Fold one command's connection-state effect into the session context. */
+function applyStateEffect(context: RespSessionContext, effect: StateEffect): void {
+	switch (effect) {
+		case 'latchDirty':
+			context.latchedDirty = true;
+			break;
+		case 'multiOpen':
+			context.openMulti = true;
+			break;
+		case 'txnClose':
+			// EXEC / DISCARD end the transaction and clear any WATCHed keys.
+			context.openMulti = false;
+			context.watching = false;
+			break;
+		case 'watchOpen':
+			context.watching = true;
+			break;
+		case 'watchClose':
+			context.watching = false;
+			break;
+		case 'reset':
+			// RESET returns the connection to its pristine state, so nothing is left to leak.
+			context.latchedDirty = false;
+			context.openMulti = false;
+			context.watching = false;
+			break;
+		case 'none':
+			break;
+	}
+}
+
+/** True when the session left connection-scoped state that must not be recycled to another tenant. */
+function isSessionDirty(context: RespSessionContext): boolean {
+	return context.latchedDirty || context.openMulti || context.watching;
 }
 
 /** Rewrite a forbidden command to `[__proxima_command_denied__, <original name>]` so the service errors. */

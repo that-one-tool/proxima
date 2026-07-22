@@ -169,6 +169,21 @@ forbidden command (this preserves one-reply-per-command ordering). The policy ta
   Lua/function commands (`EVAL`/`EVALSHA`/`FCALL`) whose caller-supplied key list would bypass prefixing,
   and legacy readers like `SUBSTR`. Non-RESP (inline) requests are denied for the same reason.
 
+### Connection-state isolation (destroy-on-dirty)
+
+The upstream connection pool is shared across all tenants, so a pooled socket a tenant used can be
+re-leased to a different tenant. Key isolation is unaffected (the prefix comes from the port mapping, not
+the socket), but a **passthrough** command can leave *connection-scoped* state on the socket that would
+otherwise leak to the next tenant. The transformer therefore flags a session "recycle-unsafe" (via the
+`RECYCLE_UNSAFE_KEY` `SessionState` contract) when it forwards such a command, and the proxy **destroys**
+that connection on release instead of pooling it, replacing it with a fresh one. Flagged as unsafe:
+
+- `SELECT` to a non-zero DB, `AUTH`, `HELLO 3` (or `HELLO … AUTH …`), `SUBSCRIBE`/`PSUBSCRIBE`/`SSUBSCRIBE`,
+  `CLIENT REPLY`/`CLIENT TRACKING`.
+- An **open** `MULTI` or `WATCH` (the balance is tracked, so a completed `MULTI`/`EXEC` or `WATCH`/`UNWATCH`
+  stays recyclable; `RESET` clears everything). Benign metadata like `CLIENT SETNAME`/`SETINFO` does not
+  flag the session, so the common client handshake keeps the connection poolable.
+
 ### Known limitations
 
 - **RESP3 (`HELLO 3`)**: once a client negotiates RESP3, response-side prefix stripping is disabled for
