@@ -19,35 +19,42 @@ Proxima implementation for proxying RESP compatible services (Redis, Valkey, ...
 
 ### Environment Variables
 
-- `PORT_PREFIX_MAP`: Configures multiple port-to-prefix mappings in the format "port1:prefix1,port2:prefix2"
-- `DEFAULT_KEY_PREFIX`: Sets the default prefix to use when no specific mapping is provided (default: "default:")
-- `DEFAULT_LISTENING_PORT`: Sets the default port to listen on when no port mappings are provided (default: 6380)
-- `REDIS_HOST`: Redis server address (default: "127.0.0.1")
-- `REDIS_PORT`: Redis server port (default: 6379)
-- `IP_WHITELIST`: Comma-separated list of IP addresses allowed to connect (use "_._._._" to allow all)
+- `PORT_MAPPING`: Configures multiple port-to-prefix mappings in the format "port1:prefix1,port2:prefix2". A
+  trailing colon is appended to each prefix when absent (so `7000:app1` prefixes keys with `app1:`).
+- `DEFAULT_PORT_MAPPING`: Sets the default prefix to use when no `PORT_MAPPING` is provided (default: "default")
+- `DEFAULT_LISTENING_PORT`: Sets the default port to listen on when no port mappings are provided (default: 7000)
+- `FORWARD_SERVICE_HOST`: Upstream RESP service address (default: "127.0.0.1")
+- `FORWARD_SERVICE_PORT`: Upstream RESP service port (default: 6379)
+- `FORWARD_SERVICE_NAME`: Label used for the upstream service in logs and metrics (default: "unknown-forward-service")
+- `TRUSTED_HTTP_PORT`: Port exposing the healthcheck (`/api/v1/healthcheck`) and Prometheus metrics
+  (`/api/v1/metrics`) endpoints (default: 9101)
+- `IP_WHITELIST`: Comma-separated list of IP addresses allowed to connect (use "\*.\*.\*.\*" to allow all)
 - `IP_BLACKLIST`: Comma-separated list of IP addresses that are blocked from connecting
 - `CLIENT_IDLE_TIMEOUT_MS`: Close a client connection (and release its pooled service connection) after this many
   milliseconds of inactivity, preventing idle clients from exhausting the pool. `0` (default) disables it.
+
+Connection-pool sizing (`FORWARD_SERVICE_MIN_POOL_CONNECTIONS`, `FORWARD_SERVICE_MAX_POOL_CONNECTIONS`, …) and
+TLS (`TLS_CLIENT_*`, `TLS_SERVER_*`) are handled by the core engine; see `packages/core` for those variables.
 
 ### Examples
 
 ```bash
 # Configure multiple ports with different prefixes
-PORT_PREFIX_MAP="6380:app1,6381:app2,6382:app3" npm start
+PORT_MAPPING="6380:app1,6381:app2,6382:app3" npm start
 
 # Configure a single port with a specific prefix
-PORT_PREFIX_MAP="6380:myapp" npm start
+PORT_MAPPING="6380:myapp" npm start
 
 # Set a custom default prefix and use IP whitelist
-DEFAULT_KEY_PREFIX="myservice" IP_WHITELIST="192.168.1.5,10.0.0.2" npm start
+DEFAULT_PORT_MAPPING="myservice" IP_WHITELIST="192.168.1.5,10.0.0.2" npm start
 ```
 
 ### Default Configuration
 
-If no `PORT_PREFIX_MAP` is provided, the system will:
+If no `PORT_MAPPING` is provided, the system will:
 
-1. Listen on the port specified by `DEFAULT_LISTENING_PORT` (defaults to 6380)
-2. Use the prefix specified by `DEFAULT_KEY_PREFIX` (defaults to "default:")
+1. Listen on the port specified by `DEFAULT_LISTENING_PORT` (defaults to 7000)
+2. Use the prefix specified by `DEFAULT_PORT_MAPPING` (defaults to "default:")
 
 ### Security
 
@@ -75,19 +82,19 @@ npm run build
 
 ```bash
 # Using multiple port-prefix mappings
-PORT_PREFIX_MAP="6380:tenant1,6381:tenant2,6382:tenant3" npm start
+PORT_MAPPING="6380:tenant1,6381:tenant2,6382:tenant3" npm start
 
 # Single mapping
-PORT_PREFIX_MAP="8000:myservice" npm start
+PORT_MAPPING="8000:myservice" npm start
 
 # Using the default prefix
-DEFAULT_KEY_PREFIX="legacy:" npm start
+DEFAULT_PORT_MAPPING="legacy:" npm start
 ```
 
 ### Development mode (build and start)
 
 ```bash
-PORT_PREFIX_MAP="6380:dev" npm run dev
+PORT_MAPPING="6380:dev" npm run dev
 ```
 
 ## Connecting to the proxy
