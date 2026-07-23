@@ -247,8 +247,31 @@ export const PASSTHROUGH_COMMANDS = new Set<string>([
 	'pubsub',
 ]);
 
-/** Commands whose reply carries stored keys that must be un-prefixed on the way back to the client. */
-export const KEY_RETURNING_COMMANDS = new Set<string>(['keys', 'scan']);
+/**
+ * Where stored keys appear in a command's reply, so the response stripper can un-prefix exactly those
+ * positions and never touch values:
+ *   - 'all'          every bulk in the reply is a key or key list (`KEYS`, `SCAN`'s `[cursor, keys]`);
+ *   - 'firstElement' the reply is an array whose first element is the source key
+ *                    (`BLPOP`/`BRPOP`/`BZPOPMIN`/`BZPOPMAX`, `LMPOP`/`ZMPOP`/`BLMPOP`/`BZMPOP`);
+ *   - 'streamNames'  the reply is an array of `[stream-name, entries]` pairs (`XREAD`/`XREADGROUP`).
+ * Commands not listed have replies that never carry keys and are forwarded verbatim.
+ */
+export type ReplyKeyShape = 'all' | 'firstElement' | 'streamNames';
+
+export const REPLY_KEY_SHAPES: Record<string, ReplyKeyShape> = {
+	keys: 'all',
+	scan: 'all',
+	blpop: 'firstElement',
+	brpop: 'firstElement',
+	bzpopmin: 'firstElement',
+	bzpopmax: 'firstElement',
+	lmpop: 'firstElement',
+	zmpop: 'firstElement',
+	blmpop: 'firstElement',
+	bzmpop: 'firstElement',
+	xread: 'streamNames',
+	xreadgroup: 'streamNames',
+};
 
 /**
  * Once a session issues one of these, the server may emit unsolicited/unordered frames (pub/sub messages),

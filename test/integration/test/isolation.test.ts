@@ -26,14 +26,14 @@ describe('per-tenant isolation (end-to-end)', () => {
 		assert.equal(await env.directClient.get('tenant-b:shared'), 'from-b');
 	});
 
-	it('a tenant cannot read another tenant\'s key', async () => {
+	it("a tenant cannot read another tenant's key", async () => {
 		await env.tenants.tenantA.client.set('secret', 'a-only');
 
 		assert.equal(await env.tenants.tenantA.client.get('secret'), 'a-only');
 		assert.equal(await env.tenants.tenantB.client.get('secret'), null, 'tenant B must not see tenant A key');
 	});
 
-	it('a tenant cannot delete another tenant\'s key', async () => {
+	it("a tenant cannot delete another tenant's key", async () => {
 		await env.tenants.tenantA.client.set('protected', 'keep');
 
 		await env.tenants.tenantB.client.del('protected');
@@ -73,5 +73,20 @@ describe('per-tenant isolation (end-to-end)', () => {
 
 		assert.ok(seen.includes('scan-a'), 'SCAN surfaces tenant A keys un-prefixed');
 		assert.ok(!seen.includes('scan-b'), 'SCAN must not surface tenant B keys');
+	});
+
+	it('SCAN honours a client-supplied MATCH pattern within the tenant namespace', async () => {
+		await env.tenants.tenantA.client.mset({ 'user:1': 'a', 'user:2': 'b', 'cfg:1': 'c' });
+		await env.tenants.tenantB.client.set('user:9', 'z');
+
+		const seen: string[] = [];
+		let cursor = '0';
+		do {
+			const [next, batch] = await env.tenants.tenantA.client.scan(cursor, 'MATCH', 'user:*');
+			cursor = next;
+			seen.push(...batch);
+		} while (cursor !== '0');
+
+		assert.deepEqual(seen.sort(), ['user:1', 'user:2'], 'only tenant A keys matching the pattern, names un-prefixed');
 	});
 });

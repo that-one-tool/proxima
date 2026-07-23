@@ -31,6 +31,7 @@ export class ConnectionPool extends EventEmitter {
 	private connections: Map<string, PoolConnection> = new Map();
 	private waitingQueue: Array<(connection: LeasedConnection | null) => void> = [];
 	private cleanupTimer: NodeJS.Timeout | null = null;
+	private recoveryTimer: NodeJS.Timeout | null = null;
 	private pendingConnections = 0;
 	private leaseCounter = 0;
 	private isWaitingToRetry = false;
@@ -180,6 +181,11 @@ export class ConnectionPool extends EventEmitter {
 			this.cleanupTimer = null;
 		}
 
+		if (this.recoveryTimer) {
+			clearTimeout(this.recoveryTimer);
+			this.recoveryTimer = null;
+		}
+
 		this.rejectAllWaiters();
 
 		for (const id of [...this.connections.keys()]) {
@@ -278,6 +284,7 @@ export class ConnectionPool extends EventEmitter {
 	private async createMultipleConnections(count: number): Promise<void> {
 		for (let i = 0; i < count; i++) {
 			await this.createConnection();
+			this.serveNextWaiter();
 		}
 	}
 
@@ -322,7 +329,11 @@ export class ConnectionPool extends EventEmitter {
 	}
 
 	private hasRoomForNewConnection(): boolean {
-		return this.connections.size + this.pendingConnections < this.options.maxPoolConnections;
+		return this.roomForNewConnections() > 0;
+	}
+
+	private roomForNewConnections(): number {
+		return Math.max(0, this.options.maxPoolConnections - this.connections.size - this.pendingConnections);
 	}
 
 	private async initialize(): Promise<void> {
@@ -372,7 +383,8 @@ export class ConnectionPool extends EventEmitter {
 		this.isWaitingToRetry = false;
 
 		const currentCount = this.connections.size;
-		const neededConnections = Math.max(0, this.options.minPoolConnections - currentCount);
+		const missingBelowMinimum = Math.max(0, this.options.minPoolConnections - currentCount);
+		const neededConnections = Math.min(missingBelowMinimum, this.roomForNewConnections());
 
 		this.logger.info(
 			`[ConnectionPool] Reinitializing connections. Current: ${currentCount}, Minimum required: ${this.options.minPoolConnections}, Creating: ${neededConnections}`,
@@ -400,6 +412,7 @@ export class ConnectionPool extends EventEmitter {
 
 		this.destroyConnection(connectionId, connection);
 		this.replenishIfBelowMinimum();
+		void this.serveNextWaiterWithCreate();
 	}
 
 	private removeWaiter(callback: (connection: LeasedConnection | null) => void): void {
@@ -429,7 +442,8 @@ export class ConnectionPool extends EventEmitter {
 		const backoffDelay = this.computeBackoffDelay();
 		this.logger.info(`[ConnectionPool] Scheduling recovery attempt ${this.retryCount} after ${backoffDelay}ms`);
 
-		setTimeout(() => {
+		this.recoveryTimer = setTimeout(() => {
+			this.recoveryTimer = null;
 			void this.attemptReinitialization();
 		}, backoffDelay);
 	}
@@ -448,6 +462,29 @@ export class ConnectionPool extends EventEmitter {
 		if (callback) {
 			callback(connection);
 		}
+	}
+
+	private async serveNextWaiterWithCreate(): Promise<void> {
+		if (this.isShuttingDown || this.waitingQueue.length === 0) {
+			return;
+		}
+
+		const connection = await this.createLeasedConnectionIfRoom();
+		if (!connection) {
+			return;
+		}
+
+		this.handOffOrRecycle(connection);
+	}
+
+	private handOffOrRecycle(connection: LeasedConnection): void {
+		const callback = this.waitingQueue.shift();
+		if (callback) {
+			callback(connection);
+			return;
+		}
+
+		this.releaseConnection(connection.id, connection.leaseId);
 	}
 
 	private startCleanup(): void {
@@ -492,7 +529,9 @@ export class ConnectionPool extends EventEmitter {
 
 		const timer = setTimeout(() => {
 			socket.destroy();
-			reject(new ConnectionPoolError('Connection attempt timed out', { context: { host: this.options.host, port: this.options.port } }));
+			reject(
+				new ConnectionPoolError('Connection attempt timed out', { context: { host: this.options.host, port: this.options.port } }),
+			);
 		}, this.options.connectionTimeoutMs);
 
 		socket.once('connect', () => {

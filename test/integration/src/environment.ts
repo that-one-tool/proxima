@@ -16,6 +16,8 @@ export interface TenantHandle {
 
 export interface IntegrationEnvironment {
 	host: string;
+	/** Trusted HTTP port of the spawned service (healthcheck / metrics). */
+	httpPort: number;
 	/** ioredis client connected DIRECTLY to the upstream Redis, for asserting what was actually stored. */
 	directClient: Redis;
 	tenants: Record<string, TenantHandle>;
@@ -56,6 +58,7 @@ export async function startEnvironment(
 
 	return {
 		host: '127.0.0.1',
+		httpPort,
 		directClient,
 		tenants,
 		stop: () => stopAll(redis, proxima, directClient, tenants),
@@ -82,7 +85,10 @@ function connectTenants(plans: TenantPlan[]): Record<string, TenantHandle> {
 		tenants[plan.name] = {
 			port: plan.port,
 			prefix: plan.prefix,
-			client: new Redis({ host: '127.0.0.1', port: plan.port, maxRetriesPerRequest: 3 }),
+			// Lazy so an unused tenant client never pins a pooled upstream connection (each proxy session
+			// leases one for its whole lifetime — with a pool of 1 an eager client would starve every other
+			// session). ioredis still auto-connects on the first command, so tests use it transparently.
+			client: new Redis({ host: '127.0.0.1', port: plan.port, maxRetriesPerRequest: 3, lazyConnect: true }),
 		};
 	}
 	return tenants;

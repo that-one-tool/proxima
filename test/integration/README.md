@@ -15,8 +15,7 @@ real client.
 ## Requirements
 
 - **Node >= 24** — tests are TypeScript and run under the built-in runner via native type-stripping
-  (`node --test`). No jest / ts-jest / swc involved, so the repo-wide jest breakage does not affect
-  this suite.
+  (`node --test`). No jest / ts-jest / swc involved.
 - **A working Docker runtime** (Docker Desktop, Colima, Podman with the Docker API, etc.).
   `testcontainers` needs it to start Redis. Without it every suite fails in its `before` hook with
   `Could not find a working container runtime strategy` — the test bodies never run.
@@ -36,6 +35,10 @@ Or, from this directory after a build:
 npm run test:integration        # node --test "test/**/*.test.ts"
 ```
 
+Each test file boots its own Redis container and spawned proxy process, and `node --test` runs files
+concurrently — expect several containers at once. On a constrained machine, serialize with
+`node --test --test-concurrency=1 "test/**/*.test.ts"`.
+
 The suite is **not** part of `npm test` (turbo `test`) — it has its own `test:integration` script and
 no `test` script, so the default unit-test run never pulls in Docker.
 
@@ -49,21 +52,29 @@ src/
   resp-raw.ts          raw RESP framing + a raw TCP client (for byte-level edge cases)
   environment.ts       orchestrates Redis + Proxima + ioredis clients into one fixture
 test/
-  prefixing.test.ts            SET/GET, MSET/MGET, DEL, HSET/HGET, EXPIRE, pipelines  (expected PASS)
-  isolation.test.ts            two tenants / two ports / two prefixes cannot cross     (expected PASS)
-  known-bug-edge-cases.test.ts large values, pipeline poisoning, prefix-shaped values (expected FAIL)
+  prefixing.test.ts               SET/GET, MSET/MGET, DEL, HSET/HGET, EXPIRE, pipelines, binary keys
+                                  and values, concurrent clients, key-carrying replies (BLPOP/LMPOP/
+                                  XREAD names un-prefixed), the trusted HTTP healthcheck
+  isolation.test.ts               two tenants / two ports / two prefixes cannot cross; KEYS and SCAN
+                                  (with and without MATCH) stay inside the tenant namespace
+  command-isolation.test.ts       default-deny: FLUSHALL / SUBSTR / RANDOMKEY / EVAL are rejected, and
+                                  a denial never desyncs later replies on the same connection
+  transactions-and-pubsub.test.ts MULTI/EXEC queued-command prefixing; pub/sub passthrough (payloads
+                                  are never rewritten once a session subscribes)
+  connection-state.test.ts        pooled upstream lifecycle: clean sessions are recycled (same CLIENT ID),
+                                  dirty ones (SELECT n≠0, ...) are destroyed instead of leaking state
+  ip-whitelist.test.ts            a non-whitelisted client is dropped before any byte reaches the service
+  regression-guards.test.ts       large split frames, empty-array pipelines, prefix-shaped values
 ```
 
-## Known-bug edge cases (expected to fail until fixed)
+## Regression guards
 
-`known-bug-edge-cases.test.ts` asserts the **correct** behavior for three findings in
-`REVIEW-second-pass-2026-07-21.md`. They are expected to **fail against current code** and are
-deliberately not skipped or marked `todo` — a red result is the point; it proves the suite has real
-diagnostic power. Each turns green when the underlying bug is fixed.
+`regression-guards.test.ts` asserts the **correct** behavior for three correctness bugs found in an
+earlier review and since fixed. All three are expected to **pass**; a red result means a fix has
+regressed.
 
-| Test | REVIEW finding | Why current code fails |
-| --- | --- | --- |
-| `a >64KB value still stores the key under the tenant prefix` | #1 — no frame reassembly | A value larger than one socket read splits the RESP frame across TCP segments; the per-chunk transform can't parse the whole frame and forwards the key **unprefixed**. |
-| `a command following an empty-array frame is still prefixed` | #2 — null parse aborts the rest | A `*0` frame mid-pipeline makes the parser bail and forward everything after it raw, so the trailing command's key is **unprefixed**. |
-| `a value whose bytes start with the tenant prefix round-trips uncorrupted` | #3 — blind response stripping | The response transformer strips the prefix from **any** bulk string starting with those bytes, corrupting a stored value that legitimately begins with the prefix. |
-```
+| Test                                                                       | Guards against                                                                                                                                                                     |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a >64KB value still stores the key under the tenant prefix`               | Frame reassembly: a value larger than one socket read splits its RESP frame across TCP segments; without reassembly the key would be forwarded **unprefixed**.                     |
+| `a command following an empty-array frame is still prefixed`               | Empty-array handling: a `*0` frame mid-pipeline must not abort parsing, or every later command in the same write goes out **unprefixed**.                                          |
+| `a value whose bytes start with the tenant prefix round-trips uncorrupted` | Correlated stripping: only replies to key-returning commands (`KEYS`/`SCAN`) are un-prefixed, so a stored value that legitimately begins with the prefix bytes is never corrupted. |

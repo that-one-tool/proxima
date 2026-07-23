@@ -1,5 +1,11 @@
 import { RECYCLE_UNSAFE_KEY } from '@that-one-tool/proxima-core';
-import { createKeyPrefixer, createResponseStripper, prefixRedisKeys, removePrefixFromRedisResponse, SessionTransformer } from '../../src/resp-handling';
+import {
+	createKeyPrefixer,
+	createResponseStripper,
+	prefixRedisKeys,
+	removePrefixFromRedisResponse,
+	SessionTransformer,
+} from '../../src/resp-handling';
 import { KEY_COMMANDS } from '../../src/resp-constants';
 
 const CRLF = Buffer.from('\r\n');
@@ -362,8 +368,38 @@ describe('variadic key commands (A4-#7 follow-up)', () => {
 	});
 
 	it('prefixes every SORT key across BY, GET, LIMIT and STORE clauses', () => {
-		const input = command('SORT', 'mylist', 'BY', 'weight_*', 'LIMIT', '0', '10', 'GET', 'object_*', 'GET', '#', 'ALPHA', 'STORE', 'dest');
-		const expected = command('SORT', 'test:mylist', 'BY', 'test:weight_*', 'LIMIT', '0', '10', 'GET', 'test:object_*', 'GET', '#', 'ALPHA', 'STORE', 'test:dest');
+		const input = command(
+			'SORT',
+			'mylist',
+			'BY',
+			'weight_*',
+			'LIMIT',
+			'0',
+			'10',
+			'GET',
+			'object_*',
+			'GET',
+			'#',
+			'ALPHA',
+			'STORE',
+			'dest',
+		);
+		const expected = command(
+			'SORT',
+			'test:mylist',
+			'BY',
+			'test:weight_*',
+			'LIMIT',
+			'0',
+			'10',
+			'GET',
+			'test:object_*',
+			'GET',
+			'#',
+			'ALPHA',
+			'STORE',
+			'test:dest',
+		);
 
 		expect(prefixRedisKeys(input, prefix)).toEqual(expected);
 	});
@@ -588,6 +624,74 @@ describe('createResponseStripper — correlated stripping (finding #3)', () => {
 		const reply = respArray(bulk(Buffer.from('test:k1')));
 
 		expect(response(reply, prefix)).toEqual(reply);
+	});
+});
+
+describe('key-carrying replies are un-prefixed positionally', () => {
+	const prefix = 'test:';
+
+	it('strips only the key position of a BLPOP reply, preserving a value that starts with the prefix', () => {
+		const { request, response } = respSession();
+		request(command('BLPOP', 'q', '0'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:q')), bulk(Buffer.from('test:not-a-key')));
+		const expected = respArray(bulk(Buffer.from('q')), bulk(Buffer.from('test:not-a-key')));
+
+		expect(response(reply, prefix)).toEqual(expected);
+	});
+
+	it('passes a null (timed-out) BLPOP reply through unchanged', () => {
+		const { request, response } = respSession();
+		request(command('BLPOP', 'q', '1'), prefix);
+
+		const reply = Buffer.from('*-1\r\n');
+
+		expect(response(reply, prefix)).toEqual(reply);
+	});
+
+	it('strips the source key of an LMPOP reply but not the popped elements', () => {
+		const { request, response } = respSession();
+		request(command('LMPOP', '1', 'mq', 'LEFT'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:mq')), respArray(bulk(Buffer.from('test:looks-prefixed'))));
+		const expected = respArray(bulk(Buffer.from('mq')), respArray(bulk(Buffer.from('test:looks-prefixed'))));
+
+		expect(response(reply, prefix)).toEqual(expected);
+	});
+
+	it('strips the key of a BZPOPMIN reply but not the member or score', () => {
+		const { request, response } = respSession();
+		request(command('BZPOPMIN', 'zs', '0'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:zs')), bulk(Buffer.from('test:member')), bulk(Buffer.from('1.5')));
+		const expected = respArray(bulk(Buffer.from('zs')), bulk(Buffer.from('test:member')), bulk(Buffer.from('1.5')));
+
+		expect(response(reply, prefix)).toEqual(expected);
+	});
+
+	it('strips each stream name of an XREAD reply but no entry ids, fields or values', () => {
+		const { request, response } = respSession();
+		request(command('XREAD', 'STREAMS', 's1', 's2', '0', '0'), prefix);
+
+		const entry = respArray(bulk(Buffer.from('1-1')), respArray(bulk(Buffer.from('field')), bulk(Buffer.from('test:value'))));
+		const reply = respArray(
+			respArray(bulk(Buffer.from('test:s1')), respArray(entry)),
+			respArray(bulk(Buffer.from('test:s2')), respArray()),
+		);
+		const expected = respArray(respArray(bulk(Buffer.from('s1')), respArray(entry)), respArray(bulk(Buffer.from('s2')), respArray()));
+
+		expect(response(reply, prefix)).toEqual(expected);
+	});
+
+	it('reassembles a key-carrying reply split across a TCP boundary before positional stripping', () => {
+		const { request, response } = respSession();
+		request(command('BRPOP', 'jobs', '0'), prefix);
+
+		const reply = respArray(bulk(Buffer.from('test:jobs')), bulk(Buffer.from('payload')));
+		const split = Math.floor(reply.length / 2);
+		const output = Buffer.concat([response(reply.subarray(0, split), prefix), response(reply.subarray(split), prefix)]);
+
+		expect(output).toEqual(respArray(bulk(Buffer.from('jobs')), bulk(Buffer.from('payload'))));
 	});
 });
 

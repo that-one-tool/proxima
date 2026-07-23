@@ -3,9 +3,10 @@ import {
 	DENIED_COMMAND_SENTINEL,
 	KEY_POSITIONS,
 	KEY_RESOLVERS,
-	KEY_RETURNING_COMMANDS,
 	KeyPattern,
 	PASSTHROUGH_COMMANDS,
+	REPLY_KEY_SHAPES,
+	ReplyKeyShape,
 	RESP,
 	RESP_SPLIT,
 	RESP_U8,
@@ -27,8 +28,8 @@ const RESP_SESSION_KEY = '__respSession';
  * of the same connection. It lets the stripper rewrite *only* replies to key-returning commands.
  */
 interface RespSessionContext {
-	/** FIFO of awaited replies: `true` when the reply carries keys that must be un-prefixed. */
-	pending: boolean[];
+	/** FIFO of awaited replies: where each reply carries keys that must be un-prefixed (`null`: nowhere). */
+	pending: Array<ReplyKeyShape | null>;
 	/** Set once request→reply order can no longer be trusted; the stripper then passes everything through. */
 	correlationLost: boolean;
 	/** A permanently connection-mutating command ran (SELECT n≠0, AUTH, HELLO 3, SUBSCRIBE, CLIENT REPLY/TRACKING). */
@@ -53,13 +54,13 @@ type CommandClass = 'scan' | 'prefix' | 'passthrough' | 'deny';
 interface CommandSignal {
 	/** `false` only for an empty (`*0`) / null (`*-1`) array, which draws no reply. */
 	drawsReply: boolean;
-	/** The reply to this command carries keys that must be un-prefixed. */
-	keyReturning: boolean;
+	/** Where the reply to this command carries keys that must be un-prefixed (`null`: nowhere). */
+	replyShape: ReplyKeyShape | null;
 	/** After this command, request→reply order can no longer be trusted (subscribe, RESP3, CLIENT REPLY). */
 	breaksCorrelation: boolean;
 }
 
-const NO_REPLY_SIGNAL: CommandSignal = { drawsReply: false, keyReturning: false, breaksCorrelation: false };
+const NO_REPLY_SIGNAL: CommandSignal = { drawsReply: false, replyShape: null, breaksCorrelation: false };
 
 function getRespContext(session: SessionState): RespSessionContext {
 	const existing = session[RESP_SESSION_KEY] as RespSessionContext | undefined;
@@ -90,16 +91,16 @@ function recordCommands(context: RespSessionContext, signals: CommandSignal[]): 
 		if (!signal.drawsReply) {
 			continue;
 		}
-		context.pending.push(signal.keyReturning);
+		context.pending.push(signal.replyShape);
 	}
 }
 
-/** Consume the expectation for one fully-received reply; only key-returning replies get stripped. */
-function shouldStripReply(context: RespSessionContext): boolean {
+/** Consume the expectation for one fully-received reply; only its key-carrying positions get stripped. */
+function takeReplyShape(context: RespSessionContext): ReplyKeyShape | null {
 	if (context.correlationLost || context.pending.length === 0) {
-		return false;
+		return null;
 	}
-	return context.pending.shift() ?? false;
+	return context.pending.shift() ?? null;
 }
 
 /**
@@ -291,10 +292,10 @@ function isKnownReplyType(firstByte: number): boolean {
 
 /**
  * Walks each fully-received top-level reply at the front of `buffer`. A reply is framed by its declared
- * lengths (binary-safe) and only rewritten when its correlated command returns keys; otherwise its exact
- * bytes are forwarded. If a RESP3 aggregate type is encountered (only after the client negotiated
- * `HELLO 3`, which itself already breaks correlation), the flat scanner cannot frame it, so correlation
- * is dropped and the remainder is forwarded verbatim rather than risking a desync.
+ * lengths (binary-safe) and only rewritten where its correlated command's reply carries keys; otherwise
+ * its exact bytes are forwarded. If a RESP3 aggregate type is encountered (only after the client
+ * negotiated `HELLO 3`, which itself already breaks correlation), the flat scanner cannot frame it, so
+ * correlation is dropped and the remainder is forwarded verbatim rather than risking a desync.
  */
 function stripCorrelatedReplies(data: Buffer, prefix: Buffer, context: RespSessionContext): WalkResult {
 	const output: Buffer[] = [];
@@ -313,11 +314,114 @@ function stripCorrelatedReplies(data: Buffer, prefix: Buffer, context: RespSessi
 		if (next === null) {
 			break;
 		}
-		output.push(shouldStripReply(context) ? concatOrEmpty(stripped) : data.subarray(offset, next));
+		output.push(rewriteReply(takeReplyShape(context), data, offset, next, prefix, stripped));
 		offset = next;
 	}
 
 	return { output: concatOrEmpty(output), consumed: offset };
+}
+
+type ReplyRewriter = (data: Buffer, start: number, end: number, prefix: Buffer, blanketStripped: Buffer[]) => Buffer;
+
+const REPLY_REWRITERS: Record<ReplyKeyShape, ReplyRewriter> = {
+	all: (_data, _start, _end, _prefix, blanketStripped) => concatOrEmpty(blanketStripped),
+	firstElement: stripFirstElement,
+	streamNames: stripStreamNames,
+};
+
+/** Rewrites one fully-framed reply according to where its command's reply carries keys. */
+function rewriteReply(
+	shape: ReplyKeyShape | null,
+	data: Buffer,
+	start: number,
+	end: number,
+	prefix: Buffer,
+	blanketStripped: Buffer[],
+): Buffer {
+	if (shape === null) {
+		return data.subarray(start, end);
+	}
+	return REPLY_REWRITERS[shape](data, start, end, prefix, blanketStripped);
+}
+
+/**
+ * BLPOP-family reply: `[key, ...rest]`. Strips the prefix from the first element only, so a popped
+ * VALUE that happens to begin with the prefix bytes is never corrupted. A null (timed-out) reply or
+ * an unexpected shape is forwarded verbatim (fail-safe).
+ */
+function stripFirstElement(data: Buffer, start: number, end: number, prefix: Buffer): Buffer {
+	const header = readArrayHeader(data, start);
+	if (!header || header.count < 1) {
+		return data.subarray(start, end);
+	}
+	const key = readBulk(data, header.next);
+	if (!key || key.isNull) {
+		return data.subarray(start, end);
+	}
+	return Buffer.concat([data.subarray(start, header.next), stripBulk(data, key, prefix), data.subarray(key.next, end)]);
+}
+
+/**
+ * XREAD / XREADGROUP reply: `[[stream-name, entries], ...]`. Strips the prefix from each pair's stream
+ * name and leaves entry ids, fields and values verbatim. A null reply or an unexpected shape is
+ * forwarded verbatim (fail-safe).
+ */
+function stripStreamNames(data: Buffer, start: number, end: number, prefix: Buffer): Buffer {
+	const header = readArrayHeader(data, start);
+	if (!header || header.count < 1) {
+		return data.subarray(start, end);
+	}
+	const chunks: Buffer[] = [data.subarray(start, header.next)];
+	const consumed = appendStrippedStreamPairs(data, header, prefix, chunks);
+	if (consumed === null) {
+		return data.subarray(start, end);
+	}
+	chunks.push(data.subarray(consumed, end));
+	return Buffer.concat(chunks);
+}
+
+function appendStrippedStreamPairs(data: Buffer, header: ArrayHeader, prefix: Buffer, chunks: Buffer[]): number | null {
+	let cursor = header.next;
+	for (let index = 0; index < header.count; index++) {
+		const next = appendStrippedStreamPair(data, cursor, prefix, chunks);
+		if (next === null) {
+			return null;
+		}
+		cursor = next;
+	}
+	return cursor;
+}
+
+/** One `[stream-name, entries]` pair: emit the pair header, the un-prefixed name, and the entries verbatim. */
+function appendStrippedStreamPair(data: Buffer, offset: number, prefix: Buffer, chunks: Buffer[]): number | null {
+	const pair = readArrayHeader(data, offset);
+	if (!pair || pair.count < 1) {
+		return null;
+	}
+	const name = readBulk(data, pair.next);
+	if (!name || name.isNull) {
+		return null;
+	}
+	const entriesEnd = measureElements(data, name.next, pair.count - 1);
+	if (entriesEnd === null) {
+		return null;
+	}
+	chunks.push(data.subarray(offset, pair.next), stripBulk(data, name, prefix), data.subarray(name.next, entriesEnd));
+	return entriesEnd;
+}
+
+/** Returns the offset just past `count` consecutive RESP values, or null if they are not fully framed. */
+function measureElements(data: Buffer, offset: number, count: number): number | null {
+	let cursor = offset;
+	for (let index = 0; index < count; index++) {
+		// stripValue already frames every value shape; reuse it for measuring and discard the rewrite.
+		const next = stripValue(data, cursor, EMPTY_BUFFER, []);
+		if (next === null) {
+			return null;
+		}
+		cursor = next;
+	}
+	return cursor;
 }
 
 /**
@@ -445,17 +549,14 @@ function transformCommand(kind: CommandClass, data: Buffer, offset: number, elem
 }
 
 function signalFor(kind: CommandClass, name: string, data: Buffer, elements: BulkToken[]): CommandSignal {
-	if (kind === 'scan') {
-		return { drawsReply: true, keyReturning: true, breaksCorrelation: false };
-	}
-	if (kind === 'prefix') {
-		return { drawsReply: true, keyReturning: KEY_RETURNING_COMMANDS.has(name), breaksCorrelation: false };
+	if (kind === 'scan' || kind === 'prefix') {
+		return { drawsReply: true, replyShape: REPLY_KEY_SHAPES[name] ?? null, breaksCorrelation: false };
 	}
 	if (kind === 'passthrough') {
-		return { drawsReply: true, keyReturning: false, breaksCorrelation: breaksCorrelation(name, data, elements) };
+		return { drawsReply: true, replyShape: null, breaksCorrelation: breaksCorrelation(name, data, elements) };
 	}
 	// A denied command is rewritten to an unknown-command frame, which still draws one (error) reply.
-	return { drawsReply: true, keyReturning: false, breaksCorrelation: false };
+	return { drawsReply: true, replyShape: null, breaksCorrelation: false };
 }
 
 /** A passthrough command that makes subsequent replies unorderable/unframeable relative to requests. */

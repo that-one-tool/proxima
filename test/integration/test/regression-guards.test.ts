@@ -5,14 +5,13 @@ import type { IntegrationEnvironment, TenantHandle } from '../src/environment.ts
 import { EMPTY_ARRAY_FRAME, respCommand, sendRaw } from '../src/resp-raw.ts';
 
 /**
- * REGRESSION GUARDS — these assert the CORRECT behavior for three correctness bugs that have since been
- * fixed (frame reassembly, empty-array pipeline handling, correlated response stripping). Each maps to a
- * finding in REVIEW-second-pass-2026-07-21.md and is EXPECTED TO PASS; a red result here means the fix
- * has regressed.
+ * REGRESSION GUARDS — these assert the CORRECT behavior for three correctness bugs found in an earlier
+ * review and since fixed (frame reassembly, empty-array pipeline handling, correlated response
+ * stripping). They are EXPECTED TO PASS; a red result here means a fix has regressed.
  *
- *   - big value spanning TCP segments      -> Finding #1 (frame reassembly; key stays prefixed)
- *   - pipeline poisoned by an empty array  -> Finding #2 (a *0 frame no longer aborts prefixing)
- *   - value whose bytes start with prefix  -> Finding #3 (correlated stripping leaves values intact)
+ *   - big value spanning TCP segments      -> frame reassembly (the key stays prefixed)
+ *   - pipeline poisoned by an empty array  -> a *0 frame no longer aborts prefixing
+ *   - value whose bytes start with prefix  -> correlated stripping leaves values intact
  */
 describe('regression guards for previously-fixed correctness bugs', () => {
 	let env: IntegrationEnvironment;
@@ -27,8 +26,8 @@ describe('regression guards for previously-fixed correctness bugs', () => {
 		await env.stop();
 	});
 
-	// Finding #1: a value larger than one socket read forces the RESP frame across TCP segments.
-	// The per-chunk transform can no longer parse the whole frame and forwards the key UNPREFIXED.
+	// Frame reassembly: a value larger than one socket read forces the RESP frame across TCP segments.
+	// Without reassembly, the per-chunk transform cannot parse the whole frame and the key goes out UNPREFIXED.
 	it('a >64KB value still stores the key under the tenant prefix', async () => {
 		const bigValue = 'x'.repeat(200 * 1024);
 		await tenant.client.set('big', bigValue);
@@ -38,8 +37,8 @@ describe('regression guards for previously-fixed correctness bugs', () => {
 		assert.equal(await tenant.client.get('big'), bigValue, 'large value must round-trip intact');
 	});
 
-	// Finding #2: an empty multibulk (*0) mid-pipeline makes the parser bail and forward the REST raw,
-	// so every command after it in the same write is forwarded unprefixed.
+	// Empty-array handling: an empty multibulk (*0) mid-pipeline must not make the parser bail, or every
+	// command after it in the same write is forwarded unprefixed.
 	it('a command following an empty-array frame is still prefixed', async () => {
 		const payload = Buffer.concat([
 			respCommand('SET', 'poison-before', 'a'),
@@ -53,8 +52,8 @@ describe('regression guards for previously-fixed correctness bugs', () => {
 		assert.equal(await env.directClient.exists('poison-after'), 0, 'trailing command must not leak unprefixed');
 	});
 
-	// Finding #3: response stripping is blind byte-matching. A stored VALUE that happens to begin with
-	// the tenant prefix gets those bytes stripped on the way back, corrupting the payload.
+	// Correlated stripping: only replies to key-returning commands are un-prefixed. A stored VALUE that
+	// happens to begin with the tenant prefix must come back verbatim, never with those bytes stripped.
 	it('a value whose bytes start with the tenant prefix round-trips uncorrupted', async () => {
 		const value = `${tenant.prefix}legit-payload`;
 		await tenant.client.set('vp', value);

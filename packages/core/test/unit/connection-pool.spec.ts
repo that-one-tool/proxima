@@ -160,6 +160,118 @@ describe('ConnectionPool waiting queue cap (Bug #6)', () => {
 	});
 });
 
+describe('ConnectionPool serves waiters after a destroy frees capacity', () => {
+	it('creates a replacement connection for a queued waiter when a busy connection is destroyed', async () => {
+		const pool = makePool({ maxPoolConnections: 1, acquireConnectionTimeoutMs: 100 });
+		const held = await pool.getConnection();
+		expect(held).not.toBeNull();
+
+		const waiterPromise = pool.getConnection();
+		await flush();
+
+		pool.closeConnection(held!.id, held!.leaseId);
+		const waiter = await waiterPromise;
+
+		expect(waiter).not.toBeNull();
+		expect(pool.getStats().total).toBe(1);
+		expect(pool.getStats().busy).toBe(1);
+	});
+
+	it('unblocks a waiter when the busy connection closes unexpectedly', async () => {
+		const pool = makePool({ maxPoolConnections: 1, acquireConnectionTimeoutMs: 100 });
+		const held = await pool.getConnection();
+		expect(held).not.toBeNull();
+
+		const waiterPromise = pool.getConnection();
+		await flush();
+
+		createdSockets[0].emit('close');
+		const waiter = await waiterPromise;
+
+		expect(waiter).not.toBeNull();
+	});
+
+	it('does not create a connection on destroy when no waiter is queued', async () => {
+		const pool = makePool({ maxPoolConnections: 2 });
+		const held = await pool.getConnection();
+
+		pool.closeConnection(held!.id, held!.leaseId);
+		await flush();
+
+		expect(pool.getStats().total).toBe(0);
+	});
+
+	it('returns the replacement to the idle pool when the waiter gave up first', async () => {
+		const pool = makePool({ maxPoolConnections: 1, acquireConnectionTimeoutMs: 20, connectionTimeoutMs: 200 });
+		const held = await pool.getConnection();
+		const waiterPromise = pool.getConnection();
+		await flush();
+
+		autoConnect = false;
+		pool.closeConnection(held!.id, held!.leaseId);
+
+		const waiter = await waiterPromise;
+		expect(waiter).toBeNull();
+
+		createdSockets[1].emit('connect');
+		await flush();
+
+		expect(pool.getStats().idle).toBe(1);
+		expect(pool.getStats().busy).toBe(0);
+	});
+});
+
+describe('ConnectionPool recovery serves waiters', () => {
+	it('hands recovery-created connections to queued waiters', async () => {
+		autoConnect = false;
+		const pool = makePool({ minPoolConnections: 1, maxPoolConnections: 1, connectionTimeoutMs: 10, acquireConnectionTimeoutMs: 500 });
+
+		const waiterPromise = pool.getConnection();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		autoConnect = true;
+		await (pool as unknown as { reinitializeMinConnections: () => Promise<void> }).reinitializeMinConnections();
+
+		const waiter = await waiterPromise;
+		expect(waiter).not.toBeNull();
+	});
+
+	it('does not push the pool above maxPoolConnections during reinitialization', async () => {
+		const pool = makePool({ minPoolConnections: 2, maxPoolConnections: 2 });
+		await new Promise((resolve) => pool.once('ready', resolve));
+
+		const first = await pool.getConnection();
+		const second = await pool.getConnection();
+		pool.closeConnection(first!.id, first!.leaseId);
+		pool.closeConnection(second!.id, second!.leaseId);
+
+		const firstRetry = pool.getConnection();
+		const secondRetry = pool.getConnection();
+		await (pool as unknown as { reinitializeMinConnections: () => Promise<void> }).reinitializeMinConnections();
+		await Promise.all([firstRetry, secondRetry]);
+
+		expect(pool.getStats().total).toBeLessThanOrEqual(2);
+	});
+});
+
+describe('ConnectionPool shutdown clears pending recovery', () => {
+	it('leaves no recovery timer running after shutdown', async () => {
+		jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+		try {
+			const pool = makePool({ minPoolConnections: 1, maxPoolConnections: 1 });
+			await new Promise((resolve) => pool.once('ready', resolve));
+
+			const held = await pool.getConnection();
+			pool.closeConnection(held!.id, held!.leaseId);
+			await pool.shutdown();
+
+			expect(jest.getTimerCount()).toBe(0);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+});
+
 describe('ConnectionPool idle cleanup', () => {
 	it('never evicts below the minimum pool size', async () => {
 		const pool = makePool({ minPoolConnections: 1, maxPoolConnections: 3, idleConnectionTimeoutMs: 0 });

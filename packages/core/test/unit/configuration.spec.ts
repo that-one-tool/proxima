@@ -4,9 +4,9 @@ import { Logger } from '../../src/logging';
 const ORIGINAL_ENV = process.env;
 
 function expectGetConfigToExit(): void {
-	const exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+	const exitSpy = jest.spyOn(process, 'exit').mockImplementation((code?: number) => {
 		throw new Error(`process.exit:${code}`);
-	}) as never);
+	});
 	jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
 
 	expect(() => getConfig()).toThrow('process.exit:1');

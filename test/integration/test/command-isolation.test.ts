@@ -45,4 +45,30 @@ describe('command isolation (default-deny)', () => {
 			/unknown command|denied/i,
 		);
 	});
+
+	// The denial sentinel exists precisely to preserve one-reply-per-command ordering: the rewritten
+	// frame still draws one (error) reply, so nothing after it can desync or leak unprefixed.
+	it('a denial does not desync later replies on the same connection', async () => {
+		const client = env.tenants.tenantA.client;
+		await assert.rejects(client.call('FLUSHALL'), /unknown command|denied/i);
+
+		await client.set('after-deny', 'ok');
+		assert.equal(await client.get('after-deny'), 'ok', 'the connection must stay usable after a denial');
+		assert.equal(await env.directClient.get('tenant-a:after-deny'), 'ok', 'commands after a denial must still be prefixed');
+	});
+
+	it('a pipeline mixing denied and allowed commands keeps every reply aligned', async () => {
+		const pipeline = env.tenants.tenantA.client.pipeline();
+		pipeline.set('mix-before', 'v1');
+		pipeline.call('RANDOMKEY');
+		pipeline.set('mix-after', 'v2');
+		const results = await pipeline.exec();
+
+		assert.ok(results, 'pipeline must return one result per command');
+		assert.deepEqual(results[0], [null, 'OK'], 'command before the denial succeeds');
+		assert.match(String(results[1][0]), /unknown command|denied/i, 'the denied command errors in place');
+		assert.deepEqual(results[2], [null, 'OK'], 'command after the denial succeeds');
+		assert.equal(await env.directClient.get('tenant-a:mix-before'), 'v1');
+		assert.equal(await env.directClient.get('tenant-a:mix-after'), 'v2');
+	});
 });

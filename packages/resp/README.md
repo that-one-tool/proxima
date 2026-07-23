@@ -161,6 +161,10 @@ forbidden command (this preserves one-reply-per-command ordering). The policy ta
 - **Scoped** — `KEYS <pattern>` becomes `KEYS <prefix><pattern>`, and `SCAN` has its `MATCH` pattern
   prefixed (a scoped `MATCH <prefix>*` is injected when the client omits it), so neither can enumerate
   another tenant's keys. Their replies are un-prefixed on the way back.
+- **Key-carrying replies** — replies that embed key names are un-prefixed **positionally** (never the
+  values next to them): `KEYS`/`SCAN` results, the source key of `BLPOP`/`BRPOP`/`BZPOPMIN`/`BZPOPMAX`
+  and `LMPOP`/`ZMPOP`/`BLMPOP`/`BZMPOP`, and the stream names of `XREAD`/`XREADGROUP`. The shapes live
+  in `REPLY_KEY_SHAPES` in `src/resp-constants.ts`.
 - **Passthrough** — keyless commands that do not cross the key boundary: connection/handshake
   (`PING`, `ECHO`, `HELLO`, `AUTH`, `SELECT`, `RESET`, `CLIENT`, `COMMAND`, `INFO`, …), transactions
   (`MULTI`/`EXEC`/`DISCARD`/`UNWATCH`), and pub/sub. Extend `PASSTHROUGH_COMMANDS` to permit more.
@@ -173,7 +177,7 @@ forbidden command (this preserves one-reply-per-command ordering). The policy ta
 
 The upstream connection pool is shared across all tenants, so a pooled socket a tenant used can be
 re-leased to a different tenant. Key isolation is unaffected (the prefix comes from the port mapping, not
-the socket), but a **passthrough** command can leave *connection-scoped* state on the socket that would
+the socket), but a **passthrough** command can leave _connection-scoped_ state on the socket that would
 otherwise leak to the next tenant. The transformer therefore flags a session "recycle-unsafe" (via the
 `RECYCLE_UNSAFE_KEY` `SessionState` contract) when it forwards such a command, and the proxy **destroys**
 that connection on release instead of pooling it, replacing it with a fresh one. Flagged as unsafe:

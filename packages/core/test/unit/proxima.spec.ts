@@ -59,7 +59,7 @@ describe('Proxima', () => {
 	beforeEach(() => {
 		proxyManagerInstances.length = 0;
 		httpServerInstances.length = 0;
-		exitSpy = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+		exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
 	});
 
 	afterEach(() => {
